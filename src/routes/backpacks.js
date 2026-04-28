@@ -292,24 +292,15 @@ router.put('/items/:id/validate', async (req, res, next) => {
     }
 
     const pool = await getPool();
-    
-    // Intenta ejecutar el stored procedure si existe
-    try {
-      console.log('[validate-exec-sp] Intentando con spm_updateBackpackItemValidation');
-      const result = await pool.request()
-        .input('IdBackpackItem', sql.Int, idBackpackItem)
-        .query('EXEC lm5k.spm_updateBackpackItemValidation @IdBackpackItem');
+    let updated = false;
+    let updateError = null;
 
-      console.log('[validate-sp-success]', result.recordset);
-      res.json({ success: true, data: result.recordset?.[0] });
-      return;
-    } catch (spErr) {
-      console.log('[validate-sp-failed] SP no existe, usando UPDATE directo:', spErr.message);
-    }
+    console.log('[VALIDATE] ===== INICIO VALIDACIÓN =====');
+    console.log('[VALIDATE] ID a validar:', idBackpackItem);
 
-    // Si el SP no existe, intenta un UPDATE directo
+    // INTENTO 1: UPDATE directo a tb_contenido_backpacks
     try {
-      console.log('[validate-update-direct] Ejecutando UPDATE directo');
+      console.log('[VALIDATE] INTENTO 1: UPDATE tb_contenido_backpacks');
       const updateResult = await pool.request()
         .input('IdBackpackItem', sql.Int, idBackpackItem)
         .input('Validation', sql.Int, 1)
@@ -319,34 +310,76 @@ router.put('/items/:id/validate', async (req, res, next) => {
           WHERE IdBackpackItem = @IdBackpackItem
         `);
 
-      console.log('[validate-rows-affected]', updateResult.rowsAffected[0]);
+      console.log('[VALIDATE] Filas afectadas:', updateResult.rowsAffected[0]);
       
-      if (updateResult.rowsAffected[0] === 0) {
-        return res.status(404).json({ error: 'Ítem no encontrado' });
+      if (updateResult.rowsAffected[0] > 0) {
+        updated = true;
+        console.log('[VALIDATE] ✓ UPDATE tb_contenido_backpacks EXITOSO');
+      } else {
+        updateError = 'tb_contenido_backpacks: 0 filas afectadas';
+        console.log('[VALIDATE] ✗ tb_contenido_backpacks: 0 filas afectadas');
       }
-      
-      res.json({ success: true });
-      return;
-    } catch (updateErr) {
-      console.log('[validate-update-failed]', updateErr.message);
+    } catch (err1) {
+      updateError = err1.message;
+      console.log('[VALIDATE] ✗ tb_contenido_backpacks ERROR:', err1.message);
     }
 
-    // Si ninguna opción funciona, intenta con una tabla alternativa
-    console.log('[validate-fallback] Intentando tabla alternativa');
-    const altResult = await pool.request()
-      .input('IdBackpackItem', sql.Int, idBackpackItem)
-      .query(`
-        UPDATE lm5k.contenido_mochilas 
-        SET Validacion = 1, FechaValidacion = GETDATE()
-        WHERE IdContenidoMochila = @IdBackpackItem
-      `);
-    
-    console.log('[validate-fallback-result]', altResult.rowsAffected[0]);
+    // INTENTO 2: Si falla, intenta con tabla alternativa
+    if (!updated) {
+      try {
+        console.log('[VALIDATE] INTENTO 2: UPDATE contenido_mochilas');
+        const altResult = await pool.request()
+          .input('IdBackpackItem', sql.Int, idBackpackItem)
+          .query(`
+            UPDATE lm5k.contenido_mochilas 
+            SET Validacion = 1, FechaValidacion = GETDATE()
+            WHERE IdContenidoMochila = @IdBackpackItem
+          `);
+        
+        console.log('[VALIDATE] Filas afectadas:', altResult.rowsAffected[0]);
+        
+        if (altResult.rowsAffected[0] > 0) {
+          updated = true;
+          console.log('[VALIDATE] ✓ UPDATE contenido_mochilas EXITOSO');
+        } else {
+          console.log('[VALIDATE] ✗ contenido_mochilas: 0 filas afectadas');
+        }
+      } catch (err2) {
+        console.log('[VALIDATE] ✗ contenido_mochilas ERROR:', err2.message);
+      }
+    }
+
+    // Si seguimos sin actualizar, intenta SP
+    if (!updated) {
+      try {
+        console.log('[VALIDATE] INTENTO 3: Ejecutar SP spm_updateBackpackItemValidation');
+        const spResult = await pool.request()
+          .input('IdBackpackItem', sql.Int, idBackpackItem)
+          .query('EXEC lm5k.spm_updateBackpackItemValidation @IdBackpackItem');
+        
+        console.log('[VALIDATE] SP recordset:', spResult.recordset);
+        updated = true;
+        console.log('[VALIDATE] ✓ SP EXITOSO');
+      } catch (err3) {
+        console.log('[VALIDATE] ✗ SP ERROR:', err3.message);
+      }
+    }
+
+    if (!updated) {
+      console.log('[VALIDATE] ✗ FALLO TOTAL - Ningún método funcionó');
+      console.log('[VALIDATE] Último error:', updateError);
+      return res.status(500).json({ 
+        error: 'No se pudo actualizar la validación', 
+        detail: updateError 
+      });
+    }
+
+    console.log('[VALIDATE] ✓ ===== VALIDACIÓN EXITOSA =====');
     res.json({ success: true });
     
   } catch (err) {
-    console.error('[validate-final-error]', err.message);
-    console.error('[validate-stack]', err.stack);
+    console.error('[VALIDATE] ERROR FATAL:', err.message);
+    console.error('[VALIDATE] STACK:', err.stack);
     next(err);
   }
 });
