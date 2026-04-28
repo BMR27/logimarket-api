@@ -3,6 +3,36 @@ const { getPool, sql } = require('../config/database');
 
 const router = express.Router();
 
+let statusHistoryTableReadyPromise = null;
+
+async function ensureOrderStatusHistoryTable(pool) {
+  if (!statusHistoryTableReadyPromise) {
+    statusHistoryTableReadyPromise = pool.request().query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.objects
+        WHERE object_id = OBJECT_ID(N'lm5k.tb_orden_status_historial') AND type = 'U'
+      )
+      BEGIN
+        CREATE TABLE lm5k.tb_orden_status_historial (
+          id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+          idOrden INT NOT NULL,
+          idStatusAnterior INT NULL,
+          idStatusNuevo INT NOT NULL,
+          idMotivoStatus INT NULL,
+          idExplicacionMotivo INT NULL,
+          idUsuario INT NOT NULL,
+          fechaReagenda DATETIME NULL,
+          creationDate DATETIME NOT NULL DEFAULT GETDATE()
+        );
+
+        CREATE INDEX IX_tb_orden_status_historial_idOrden
+          ON lm5k.tb_orden_status_historial (idOrden, creationDate DESC);
+      END
+    `);
+  }
+  await statusHistoryTableReadyPromise;
+}
+
 /**
  * GET /api/orders
  * Query params: equipos (ej: "1,2,3"), folio (opcional)
@@ -115,6 +145,34 @@ router.put('/:id', async (req, res, next) => {
     }
 
     const pool = await getPool();
+    await ensureOrderStatusHistoryTable(pool);
+
+    const currentOrderRes = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .query('SELECT TOP 1 idStatus FROM lm5k.OrdenesVenta WHERE id = @IdOrden AND ISNULL(deleted,0)=0');
+
+    if (!currentOrderRes.recordset.length) {
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
+
+    const currentStatus = Number(currentOrderRes.recordset[0].idStatus || 0);
+
+    // Regla: no se puede calificar como Intento 2 sin pasar por Intento 1.
+    if (Number(status) === 6) {
+      const intento1Res = await pool.request()
+        .input('IdOrden', sql.Int, idOrden)
+        .query(`
+          SELECT TOP 1 1 AS hasIntento1
+          FROM lm5k.tb_orden_status_historial
+          WHERE idOrden = @IdOrden
+            AND (idStatusAnterior = 5 OR idStatusNuevo = 5)
+        `);
+
+      const hasIntento1 = currentStatus === 5 || currentStatus === 6 || intento1Res.recordset.length > 0;
+      if (!hasIntento1) {
+        return res.status(400).json({ error: 'No puedes marcar Intento 2 sin haber pasado antes por Intento 1' });
+      }
+    }
 
     // Actualizar la orden
     const updateResult = await pool.request()
@@ -144,6 +202,24 @@ router.put('/:id', async (req, res, next) => {
         .input('metros', sql.NVarChar(50), String(metros))
         .input('tiempo', sql.NVarChar(50), String(tiempo))
         .query('EXEC lm5k.spm_insertDatosEnvio @IdOrden, @metros, @tiempo');
+    }
+
+    // Guardar historial de calificación solo cuando hay cambio real de status.
+    if (currentStatus !== Number(status)) {
+      await pool.request()
+        .input('IdOrden', sql.Int, idOrden)
+        .input('IdStatusAnterior', sql.Int, currentStatus)
+        .input('IdStatusNuevo', sql.Int, Number(status))
+        .input('IdMotivoStatus', sql.Int, Number(motivoStatus || 0) || null)
+        .input('IdExplicacionMotivo', sql.Int, Number(explicacionMotivo || 0) || null)
+        .input('IdUsuario', sql.Int, idUsuario)
+        .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+        .query(`
+          INSERT INTO lm5k.tb_orden_status_historial
+            (idOrden, idStatusAnterior, idStatusNuevo, idMotivoStatus, idExplicacionMotivo, idUsuario, fechaReagenda, creationDate)
+          VALUES
+            (@IdOrden, @IdStatusAnterior, @IdStatusNuevo, @IdMotivoStatus, @IdExplicacionMotivo, @IdUsuario, TRY_CONVERT(datetime, @FechaReagenda), GETDATE())
+        `);
     }
 
     res.json({ success: true });
@@ -311,6 +387,50 @@ router.get('/:id/evidencia', async (req, res, next) => {
               ORDER BY creationDate DESC`);
 
     res.json(result.recordset[0] ?? null);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/orders/:id/status-history
+ * Devuelve historial de cambios de estatus de la orden
+ */
+router.get('/:id/status-history', async (req, res, next) => {
+  try {
+    const idOrden = parseInt(req.params.id, 10);
+    if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
+
+    const pool = await getPool();
+    await ensureOrderStatusHistoryTable(pool);
+
+    const result = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .query(`
+        SELECT
+          h.id,
+          h.idOrden,
+          h.idStatusAnterior,
+          h.idStatusNuevo,
+          h.idMotivoStatus,
+          h.idExplicacionMotivo,
+          h.idUsuario,
+          h.fechaReagenda,
+          h.creationDate,
+          sa.status AS statusAnterior,
+          sn.status AS statusNuevo,
+          ms.motivo AS motivoStatus,
+          em.explicacion AS explicacionMotivo
+        FROM lm5k.tb_orden_status_historial h
+        LEFT JOIN lm5k.StatusOrdenes sa ON sa.id = h.idStatusAnterior
+        LEFT JOIN lm5k.StatusOrdenes sn ON sn.id = h.idStatusNuevo
+        LEFT JOIN lm5k.MotivosStatus ms ON ms.id = h.idMotivoStatus
+        LEFT JOIN lm5k.ExplicacionesMotivo em ON em.id = h.idExplicacionMotivo
+        WHERE h.idOrden = @IdOrden
+        ORDER BY h.creationDate DESC, h.id DESC
+      `);
+
+    res.json(result.recordset);
   } catch (err) {
     next(err);
   }
