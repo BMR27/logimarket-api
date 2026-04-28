@@ -100,12 +100,28 @@ router.put('/:id', async (req, res, next) => {
     const pool = await getPool();
 
     if (stateNumber === 3) {
+      const isValidated = (item) => {
+        const raw =
+          item.Validation ??
+          item.validation ??
+          item.Validacion ??
+          item.validacion ??
+          item.isValidated;
+
+        if (raw === true || raw === 1 || raw === '1') return true;
+        if (typeof raw === 'string') {
+          const normalized = raw.trim().toLowerCase();
+          return normalized === 'true' || normalized === 'si' || normalized === 'yes';
+        }
+        return Number(raw ?? 0) === 1;
+      };
+
       const itemsResult = await pool.request()
         .input('IdBackpack', sql.Int, idBackpack)
         .query('EXEC lm5k.spm_getBackpackItemsForAdmin @IdBackpack');
 
       const pendingItems = (itemsResult.recordset || []).filter(
-        (item) => Number(item.Validation ?? item.validation ?? 0) !== 1
+        (item) => !isValidated(item)
       );
 
       if (pendingItems.length > 0) {
