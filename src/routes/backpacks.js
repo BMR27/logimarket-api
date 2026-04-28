@@ -3,6 +3,33 @@ const { getPool, sql } = require('../config/database');
 
 const router = express.Router();
 
+// ── Utilidad: envío de mensaje WhatsApp/SMS por número ──────────────────────
+// Configura TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM en Railway para activar envíos reales.
+// Si no están configuradas, solo loguea.
+async function sendMessage(to, body) {
+  const sid = process.env.TWILIO_SID;
+  const token = process.env.TWILIO_TOKEN;
+  const from = process.env.TWILIO_FROM; // ej: whatsapp:+14155238886 o +1234567890
+
+  if (!sid || !token || !from) {
+    console.log(`[MSG no enviado — sin credenciales Twilio] Para: ${to} | ${body}`);
+    return { sent: false, reason: 'no_credentials' };
+  }
+
+  try {
+    const twilio = require('twilio')(sid, token);
+    const msg = await twilio.messages.create({
+      body,
+      from,
+      to: from.startsWith('whatsapp:') ? `whatsapp:+52${to.replace(/\D/g, '')}` : `+52${to.replace(/\D/g, '')}`,
+    });
+    return { sent: true, sid: msg.sid };
+  } catch (e) {
+    console.error(`[MSG error] ${to}: ${e.message}`);
+    return { sent: false, reason: e.message };
+  }
+}
+
 /**
  * GET /api/backpacks/:idUsuario
  * Obtiene todas las mochilas del usuario (spm_getBackpacks)
@@ -68,14 +95,46 @@ router.put('/:id', async (req, res, next) => {
 
     const pool = await getPool();
     const result = await pool.request()
-      .input('IdBackpack', sql.Int, idBackpack)
-      .input('State', sql.Int, state)
-      .query('EXEC lm5k.spm_update_backpack @IdBackpack, @State');
+      .input('_IdBackpack', sql.Int, idBackpack)
+      .input('_State', sql.Int, state)
+      .query('EXEC lm5k.spm_update_backpack @_IdBackpack, @_State');
 
     const row = result.recordset[0];
     if (row && row.result === 'non-affected') {
       return res.status(404).json({ error: 'Mochila no encontrada' });
     }
+
+    // ── Mensajes masivos al aceptar mochila (state 2 = En Ruta) ─────────────
+    if (state === 2) {
+      try {
+        const ordersResult = await pool.request()
+          .input('IdBackpack', sql.Int, idBackpack)
+          .query(`
+            SELECT ov.folioOrdenCliente, ov.telefonoPrincipal, ov.cliente
+            FROM lm5k.tb_contenido_backpacks cb
+            INNER JOIN lm5k.OrdenesVenta ov ON ov.id = cb.IdOrdenVenta
+            WHERE cb.IdBackPack = @IdBackpack AND cb.Deleted = 0
+          `);
+
+        const orders = ordersResult.recordset;
+        const messagingResults = [];
+
+        for (const order of orders) {
+          const phone = (order.telefonoPrincipal || '').replace(/\D/g, '');
+          if (!phone) continue;
+
+          const msg = `Hola ${order.cliente}, tu pedido con folio ${order.folioOrdenCliente} está en camino y será entregado en breve. ¡Gracias por tu confianza!`;
+          const r = await sendMessage(phone, msg);
+          messagingResults.push({ folio: order.folioOrdenCliente, phone, ...r });
+        }
+
+        return res.json({ success: true, messaging: messagingResults });
+      } catch (msgErr) {
+        console.error('Error en mensajes masivos:', msgErr.message);
+        // No falla la respuesta principal
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     next(err);
@@ -92,10 +151,29 @@ router.get('/:id/items', async (req, res, next) => {
     if (isNaN(idBackpack)) return res.status(400).json({ error: 'ID inválido' });
 
     const pool = await getPool();
+    // Obtener ítems base
     const result = await pool.request()
       .input('IdBackpack', sql.Int, idBackpack)
       .query('EXEC lm5k.spm_getBackpackItemsForAdmin @IdBackpack');
-    res.json(result.recordset);
+
+    // Enriquecer con lat/lng de OrdenesVenta
+    const items = result.recordset;
+    if (items.length > 0) {
+      const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(Boolean).join(',');
+      const coordsResult = await pool.request()
+        .query(`SELECT IdOrdenVenta, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE IdOrdenVenta IN (${ids})`);
+      const coordMap = {};
+      for (const row of coordsResult.recordset) {
+        coordMap[row.IdOrdenVenta] = { latitud: row.Latitud, longitud: row.Longitud };
+      }
+      for (const item of items) {
+        const id = item.IdOrdenVenta || item.idOrdenVenta;
+        item.Latitud = coordMap[id]?.latitud ?? null;
+        item.Longitud = coordMap[id]?.longitud ?? null;
+      }
+    }
+
+    res.json(items);
   } catch (err) {
     next(err);
   }
@@ -114,7 +192,24 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
     const result = await pool.request()
       .input('IdRepartidor', sql.Int, idRepartidor)
       .query('EXEC lm5k.spm_getBackpackItemsForDeliver @IdRepartidor');
-    res.json(result.recordset);
+
+    const items = result.recordset;
+    if (items.length > 0) {
+      const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(Boolean).join(',');
+      const coordsResult = await pool.request()
+        .query(`SELECT IdOrdenVenta, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE IdOrdenVenta IN (${ids})`);
+      const coordMap = {};
+      for (const row of coordsResult.recordset) {
+        coordMap[row.IdOrdenVenta] = { latitud: row.Latitud, longitud: row.Longitud };
+      }
+      for (const item of items) {
+        const id = item.IdOrdenVenta || item.idOrdenVenta;
+        item.Latitud = coordMap[id]?.latitud ?? null;
+        item.Longitud = coordMap[id]?.longitud ?? null;
+      }
+    }
+
+    res.json(items);
   } catch (err) {
     next(err);
   }

@@ -11,6 +11,8 @@ const productsRoutes = require('./routes/products');
 const searchRoutes = require('./routes/search');
 const backpacksRoutes = require('./routes/backpacks');
 const catalogsRoutes = require('./routes/catalogs');
+const validacionRoutes = require('./routes/validacion');
+const adminRoutes = require('./routes/admin');
 const { errorHandler } = require('./middleware/errorHandler');
 const { authenticate } = require('./middleware/auth');
 
@@ -51,6 +53,8 @@ app.use('/api/products', authenticate, productsRoutes);
 app.use('/api/search', authenticate, searchRoutes);
 app.use('/api/backpacks', authenticate, backpacksRoutes);
 app.use('/api/catalogs', authenticate, catalogsRoutes);
+app.use('/api/validacion', authenticate, validacionRoutes);
+app.use('/api/admin', authenticate, adminRoutes);
 
 // Manejo de errores
 app.use(errorHandler);

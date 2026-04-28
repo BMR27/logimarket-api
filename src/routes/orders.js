@@ -152,4 +152,91 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+/**
+ * PUT /api/orders/:id/notes
+ * Body: { observacionesMensajero }
+ * Guarda las notas/comentarios del mensajero en la orden
+ */
+router.put('/:id/notes', async (req, res, next) => {
+  try {
+    const idOrden = parseInt(req.params.id, 10);
+    const { observacionesMensajero = '' } = req.body;
+    if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
+
+    const pool = await getPool();
+    await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .input('Notas', sql.NVarChar(1000), observacionesMensajero)
+      .query(`UPDATE lm5k.OrdenesVenta
+              SET observacionesMensajero = @Notas, lastModifiedDate = GETDATE()
+              WHERE id = @IdOrden`);
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/orders/:id/price-request
+ * Body: { precioSolicitado, motivoSolicitud, idUsuarioSolicita }
+ * Crea una solicitud de cambio de precio para la orden
+ */
+router.post('/:id/price-request', async (req, res, next) => {
+  try {
+    const idOrden = parseInt(req.params.id, 10);
+    const { precioSolicitado, motivoSolicitud = '', idUsuarioSolicita } = req.body;
+    if (isNaN(idOrden) || !precioSolicitado || !idUsuarioSolicita) {
+      return res.status(400).json({ error: 'precioSolicitado e idUsuarioSolicita son requeridos' });
+    }
+
+    const pool = await getPool();
+
+    // Cancelar solicitudes previas pendientes de esta orden
+    await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .query(`UPDATE lm5k.SolicitudesCambioOrden
+              SET estadoSolicitud = 'cancelada', lastModifiedDate = GETDATE()
+              WHERE idOrden = @IdOrden AND estadoSolicitud = 'pendiente'`);
+
+    // Insertar nueva solicitud
+    const result = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .input('IdUsuario', sql.Int, idUsuarioSolicita)
+      .input('PrecioSolicitado', sql.Decimal(18, 2), precioSolicitado)
+      .input('Motivo', sql.NVarChar(500), motivoSolicitud)
+      .query(`INSERT INTO lm5k.SolicitudesCambioOrden
+                (idOrden, idUsuarioSolicita, precioSolicitado, motivoSolicitud, estadoSolicitud, creationDate, lastModifiedDate, modifiedById, deleted)
+              OUTPUT INSERTED.id
+              VALUES (@IdOrden, @IdUsuario, @PrecioSolicitado, @Motivo, 'pendiente', GETDATE(), GETDATE(), @IdUsuario, 0)`);
+
+    res.status(201).json({ success: true, id: result.recordset[0]?.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/orders/:id/price-request
+ * Obtiene la solicitud de cambio de precio activa (pendiente o autorizada) de la orden
+ */
+router.get('/:id/price-request', async (req, res, next) => {
+  try {
+    const idOrden = parseInt(req.params.id, 10);
+    if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
+
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .query(`SELECT TOP 1 id, precioSolicitado, totalAutorizado, estadoSolicitud, motivoSolicitud, creationDate
+              FROM lm5k.SolicitudesCambioOrden
+              WHERE idOrden = @IdOrden AND estadoSolicitud IN ('pendiente','autorizada') AND deleted = 0
+              ORDER BY creationDate DESC`);
+
+    res.json(result.recordset[0] ?? null);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
