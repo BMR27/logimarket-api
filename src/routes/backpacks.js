@@ -275,34 +275,30 @@ router.delete('/items/:id', async (req, res, next) => {
 });
 
 /**
+/**
  * PUT /api/backpacks/items/:id/validate
  * Valida un ítem por escaneo
+ * ID puede ser: IdBackpackItem, IdOrdenVenta, o IdContenido
  */
 router.put('/items/:id/validate', async (req, res, next) => {
   try {
-    const idBackpackItem = parseInt(req.params.id, 10);
-    console.log('[validate-start] ID recibido:', req.params.id, 'Parseado:', idBackpackItem);
+    const idItem = parseInt(req.params.id, 10);
+    console.log('[VALIDATE] ===== INICIO VALIDACIÓN =====');
+    console.log('[VALIDATE] ID recibido:', req.params.id);
+    console.log('[VALIDATE] ID parseado:', idItem);
     
-    if (isNaN(idBackpackItem)) {
+    if (isNaN(idItem) || idItem <= 0) {
       return res.status(400).json({ error: 'ID inválido' });
-    }
-
-    if (idBackpackItem <= 0) {
-      return res.status(400).json({ error: 'ID de ítem debe ser válido y mayor a 0' });
     }
 
     const pool = await getPool();
     let updated = false;
-    let updateError = null;
 
-    console.log('[VALIDATE] ===== INICIO VALIDACIÓN =====');
-    console.log('[VALIDATE] ID a validar:', idBackpackItem);
-
-    // INTENTO 1: UPDATE directo a tb_contenido_backpacks
+    // INTENTO 1: UPDATE por IdBackpackItem (clave principal de tb_contenido_backpacks)
     try {
-      console.log('[VALIDATE] INTENTO 1: UPDATE tb_contenido_backpacks');
+      console.log('[VALIDATE] INTENTO 1: UPDATE por IdBackpackItem');
       const updateResult = await pool.request()
-        .input('IdBackpackItem', sql.Int, idBackpackItem)
+        .input('IdBackpackItem', sql.Int, idItem)
         .input('Validation', sql.Int, 1)
         .query(`
           UPDATE lm5k.tb_contenido_backpacks 
@@ -314,26 +310,50 @@ router.put('/items/:id/validate', async (req, res, next) => {
       
       if (updateResult.rowsAffected[0] > 0) {
         updated = true;
-        console.log('[VALIDATE] ✓ UPDATE tb_contenido_backpacks EXITOSO');
+        console.log('[VALIDATE] ✓ UPDATE por IdBackpackItem EXITOSO');
       } else {
-        updateError = 'tb_contenido_backpacks: 0 filas afectadas';
-        console.log('[VALIDATE] ✗ tb_contenido_backpacks: 0 filas afectadas');
+        console.log('[VALIDATE] ✗ No hay IdBackpackItem = ' + idItem);
       }
     } catch (err1) {
-      updateError = err1.message;
-      console.log('[VALIDATE] ✗ tb_contenido_backpacks ERROR:', err1.message);
+      console.log('[VALIDATE] ✗ INTENTO 1 ERROR:', err1.message);
     }
 
-    // INTENTO 2: Si falla, intenta con tabla alternativa
+    // INTENTO 2: Si no funciona, intenta UPDATE por IdOrdenVenta
     if (!updated) {
       try {
-        console.log('[VALIDATE] INTENTO 2: UPDATE contenido_mochilas');
+        console.log('[VALIDATE] INTENTO 2: UPDATE por IdOrdenVenta');
+        const updateResult = await pool.request()
+          .input('IdOrdenVenta', sql.Int, idItem)
+          .input('Validation', sql.Int, 1)
+          .query(`
+            UPDATE lm5k.tb_contenido_backpacks 
+            SET Validation = @Validation
+            WHERE IdOrdenVenta = @IdOrdenVenta
+          `);
+        
+        console.log('[VALIDATE] Filas afectadas:', updateResult.rowsAffected[0]);
+        
+        if (updateResult.rowsAffected[0] > 0) {
+          updated = true;
+          console.log('[VALIDATE] ✓ UPDATE por IdOrdenVenta EXITOSO');
+        } else {
+          console.log('[VALIDATE] ✗ No hay IdOrdenVenta = ' + idItem);
+        }
+      } catch (err2) {
+        console.log('[VALIDATE] ✗ INTENTO 2 ERROR:', err2.message);
+      }
+    }
+
+    // INTENTO 3: Tabla alternativa contenido_mochilas
+    if (!updated) {
+      try {
+        console.log('[VALIDATE] INTENTO 3: UPDATE contenido_mochilas por IdContenidoMochila');
         const altResult = await pool.request()
-          .input('IdBackpackItem', sql.Int, idBackpackItem)
+          .input('IdContenido', sql.Int, idItem)
           .query(`
             UPDATE lm5k.contenido_mochilas 
             SET Validacion = 1, FechaValidacion = GETDATE()
-            WHERE IdContenidoMochila = @IdBackpackItem
+            WHERE IdContenidoMochila = @IdContenido
           `);
         
         console.log('[VALIDATE] Filas afectadas:', altResult.rowsAffected[0]);
@@ -342,39 +362,37 @@ router.put('/items/:id/validate', async (req, res, next) => {
           updated = true;
           console.log('[VALIDATE] ✓ UPDATE contenido_mochilas EXITOSO');
         } else {
-          console.log('[VALIDATE] ✗ contenido_mochilas: 0 filas afectadas');
+          console.log('[VALIDATE] ✗ No hay IdContenidoMochila = ' + idItem);
         }
-      } catch (err2) {
-        console.log('[VALIDATE] ✗ contenido_mochilas ERROR:', err2.message);
+      } catch (err3) {
+        console.log('[VALIDATE] ✗ INTENTO 3 ERROR:', err3.message);
       }
     }
 
-    // Si seguimos sin actualizar, intenta SP
+    // INTENTO 4: Ejecutar SP si existe
     if (!updated) {
       try {
-        console.log('[VALIDATE] INTENTO 3: Ejecutar SP spm_updateBackpackItemValidation');
+        console.log('[VALIDATE] INTENTO 4: Ejecutar spm_updateBackpackItemValidation');
         const spResult = await pool.request()
-          .input('IdBackpackItem', sql.Int, idBackpackItem)
+          .input('IdBackpackItem', sql.Int, idItem)
           .query('EXEC lm5k.spm_updateBackpackItemValidation @IdBackpackItem');
         
-        console.log('[VALIDATE] SP recordset:', spResult.recordset);
+        console.log('[VALIDATE] SP retornó:', spResult.recordset);
         updated = true;
         console.log('[VALIDATE] ✓ SP EXITOSO');
-      } catch (err3) {
-        console.log('[VALIDATE] ✗ SP ERROR:', err3.message);
+      } catch (err4) {
+        console.log('[VALIDATE] ✗ INTENTO 4 ERROR:', err4.message);
       }
     }
 
     if (!updated) {
-      console.log('[VALIDATE] ✗ FALLO TOTAL - Ningún método funcionó');
-      console.log('[VALIDATE] Último error:', updateError);
+      console.log('[VALIDATE] ✗ FALLO TOTAL - Ningún método funcionó para ID:', idItem);
       return res.status(500).json({ 
-        error: 'No se pudo actualizar la validación', 
-        detail: updateError 
+        error: 'No se pudo validar el ítem. Verifica los logs.' 
       });
     }
 
-    console.log('[VALIDATE] ✓ ===== VALIDACIÓN EXITOSA =====');
+    console.log('[VALIDATE] ✓ VALIDACIÓN EXITOSA');
     res.json({ success: true });
     
   } catch (err) {
