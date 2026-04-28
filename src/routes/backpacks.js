@@ -275,6 +275,48 @@ router.delete('/items/:id', async (req, res, next) => {
 });
 
 /**
+ * PUT /api/backpacks/:id/items/validate-folio
+ * Valida un item por folio dentro de una mochila especifica.
+ * Body: { folio: string }
+ */
+router.put('/:id/items/validate-folio', async (req, res, next) => {
+  try {
+    const idBackpack = parseInt(req.params.id, 10);
+    const folio = String(req.body?.folio || '').trim();
+
+    if (isNaN(idBackpack) || idBackpack <= 0) {
+      return res.status(400).json({ error: 'IdBackpack invalido' });
+    }
+    if (!folio) {
+      return res.status(400).json({ error: 'Folio requerido' });
+    }
+
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('IdBackpack', sql.Int, idBackpack)
+      .input('Folio', sql.NVarChar(100), folio)
+      .query(`
+        UPDATE cb
+        SET cb.Validation = 1
+        FROM lm5k.tb_contenido_backpacks cb
+        INNER JOIN lm5k.OrdenesVenta ov ON ov.id = cb.IdOrdenVenta
+        WHERE cb.IdBackPack = @IdBackpack
+          AND cb.Deleted = 0
+          AND LTRIM(RTRIM(ov.folioOrdenCliente)) = @Folio
+      `);
+
+    const affected = result.rowsAffected?.[0] || 0;
+    if (affected <= 0) {
+      return res.status(404).json({ error: 'Item no encontrado en la mochila para ese folio' });
+    }
+
+    return res.json({ success: true, updated: affected, method: 'backpack+folio' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
 /**
  * PUT /api/backpacks/items/:id/validate
  * Valida un ítem por escaneo
