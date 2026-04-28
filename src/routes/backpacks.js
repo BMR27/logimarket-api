@@ -159,17 +159,24 @@ router.get('/:id/items', async (req, res, next) => {
     // Enriquecer con lat/lng de OrdenesVenta
     const items = result.recordset;
     if (items.length > 0) {
-      const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(Boolean).join(',');
-      const coordsResult = await pool.request()
-        .query(`SELECT IdOrdenVenta, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE IdOrdenVenta IN (${ids})`);
-      const coordMap = {};
-      for (const row of coordsResult.recordset) {
-        coordMap[row.IdOrdenVenta] = { latitud: row.Latitud, longitud: row.Longitud };
-      }
-      for (const item of items) {
-        const id = item.IdOrdenVenta || item.idOrdenVenta;
-        item.Latitud = coordMap[id]?.latitud ?? null;
-        item.Longitud = coordMap[id]?.longitud ?? null;
+      try {
+        const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
+        if (ids) {
+          const coordsResult = await pool.request()
+            .query(`SELECT id, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
+          const coordMap = {};
+          for (const row of coordsResult.recordset) {
+            coordMap[row.id] = { latitud: row.Latitud, longitud: row.Longitud };
+          }
+          for (const item of items) {
+            const id = item.IdOrdenVenta || item.idOrdenVenta;
+            item.Latitud = coordMap[id]?.latitud ?? null;
+            item.Longitud = coordMap[id]?.longitud ?? null;
+          }
+        }
+      } catch (coordErr) {
+        console.warn('[backpacks] No se pudo enriquecer lat/lng:', coordErr.message);
+        // No falla el endpoint principal — items se devuelven sin coordenadas
       }
     }
 
@@ -195,17 +202,24 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
 
     const items = result.recordset;
     if (items.length > 0) {
-      const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(Boolean).join(',');
-      const coordsResult = await pool.request()
-        .query(`SELECT IdOrdenVenta, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE IdOrdenVenta IN (${ids})`);
-      const coordMap = {};
-      for (const row of coordsResult.recordset) {
-        coordMap[row.IdOrdenVenta] = { latitud: row.Latitud, longitud: row.Longitud };
-      }
-      for (const item of items) {
-        const id = item.IdOrdenVenta || item.idOrdenVenta;
-        item.Latitud = coordMap[id]?.latitud ?? null;
-        item.Longitud = coordMap[id]?.longitud ?? null;
+      try {
+        const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
+        if (ids) {
+          const coordsResult = await pool.request()
+            .query(`SELECT id, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
+          const coordMap = {};
+          for (const row of coordsResult.recordset) {
+            coordMap[row.id] = { latitud: row.Latitud, longitud: row.Longitud };
+          }
+          for (const item of items) {
+            const id = item.IdOrdenVenta || item.idOrdenVenta;
+            item.Latitud = coordMap[id]?.latitud ?? null;
+            item.Longitud = coordMap[id]?.longitud ?? null;
+          }
+        }
+      } catch (coordErr) {
+        console.warn('[backpacks] No se pudo enriquecer lat/lng:', coordErr.message);
+        // No falla el endpoint principal — items se devuelven sin coordenadas
       }
     }
 
