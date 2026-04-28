@@ -183,6 +183,38 @@ router.get('/:id/items', async (req, res, next) => {
 
     // Enriquecer con lat/lng de OrdenesVenta
     const items = result.recordset;
+
+    // Fuerza Validation desde tabla base para evitar desalineacion con SP.
+    if (items.length > 0) {
+      try {
+        const validationResult = await pool.request()
+          .input('IdBackpack', sql.Int, idBackpack)
+          .query(`
+            SELECT IdBackpackItem, IdOrdenVenta, ISNULL(Validation, 0) AS Validation
+            FROM lm5k.tb_contenido_backpacks
+            WHERE IdBackPack = @IdBackpack AND Deleted = 0
+          `);
+
+        const byBackpackItem = new Map();
+        const byOrder = new Map();
+        for (const row of validationResult.recordset || []) {
+          if (row.IdBackpackItem) byBackpackItem.set(Number(row.IdBackpackItem), Number(row.Validation || 0));
+          if (row.IdOrdenVenta) byOrder.set(Number(row.IdOrdenVenta), Number(row.Validation || 0));
+        }
+
+        for (const item of items) {
+          const itemBackpackItem = Number(item.IdBackPackItem || item.IdBackpackItem || item.idBackpackItem || 0);
+          const itemOrder = Number(item.IdOrdenVenta || item.idOrdenVenta || 0);
+          const realValidation = byBackpackItem.get(itemBackpackItem) ?? byOrder.get(itemOrder);
+          if (realValidation !== undefined) {
+            item.Validation = realValidation;
+          }
+        }
+      } catch (validationErr) {
+        console.warn('[backpacks] No se pudo sincronizar Validation:', validationErr.message);
+      }
+    }
+
     if (items.length > 0) {
       try {
         const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
@@ -226,6 +258,41 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
       .query('EXEC lm5k.spm_getBackpackItemsForDeliver @IdRepartidor');
 
     const items = result.recordset;
+
+    // Fuerza Validation desde tabla base para que el mensajero vea estado persistente.
+    if (items.length > 0) {
+      try {
+        const orderIds = items
+          .map((i) => Number(i.IdOrdenVenta || i.idOrdenVenta || 0))
+          .filter((id) => Number.isInteger(id) && id > 0);
+
+        if (orderIds.length > 0) {
+          const idsCsv = [...new Set(orderIds)].join(',');
+          const validationResult = await pool.request().query(`
+            SELECT IdOrdenVenta, MAX(ISNULL(Validation, 0)) AS Validation
+            FROM lm5k.tb_contenido_backpacks
+            WHERE Deleted = 0 AND IdOrdenVenta IN (${idsCsv})
+            GROUP BY IdOrdenVenta
+          `);
+
+          const byOrder = new Map();
+          for (const row of validationResult.recordset || []) {
+            byOrder.set(Number(row.IdOrdenVenta), Number(row.Validation || 0));
+          }
+
+          for (const item of items) {
+            const itemOrder = Number(item.IdOrdenVenta || item.idOrdenVenta || 0);
+            const realValidation = byOrder.get(itemOrder);
+            if (realValidation !== undefined) {
+              item.Validation = realValidation;
+            }
+          }
+        }
+      } catch (validationErr) {
+        console.warn('[backpacks] No se pudo sincronizar Validation deliver:', validationErr.message);
+      }
+    }
+
     if (items.length > 0) {
       try {
         const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
