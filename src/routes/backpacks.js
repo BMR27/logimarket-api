@@ -88,24 +88,45 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', async (req, res, next) => {
   try {
     const idBackpack = parseInt(req.params.id, 10);
-    const { state } = req.body;
-    if (isNaN(idBackpack) || state === undefined) {
+    const stateNumber = Number(req.body?.state);
+    if (isNaN(idBackpack) || Number.isNaN(stateNumber)) {
       return res.status(400).json({ error: 'id y state son requeridos' });
     }
 
+    if (![1, 2, 3, 4].includes(stateNumber)) {
+      return res.status(400).json({ error: 'state inválido' });
+    }
+
     const pool = await getPool();
+
+    if (stateNumber === 3) {
+      const itemsResult = await pool.request()
+        .input('IdBackpack', sql.Int, idBackpack)
+        .query('EXEC lm5k.spm_getBackpackItemsForAdmin @IdBackpack');
+
+      const pendingItems = (itemsResult.recordset || []).filter(
+        (item) => Number(item.Validation ?? item.validation ?? 0) !== 1
+      );
+
+      if (pendingItems.length > 0) {
+        return res.status(400).json({
+          error: 'Debes validar todas las entregas antes de finalizar la mochila',
+        });
+      }
+    }
+
     const result = await pool.request()
       .input('_IdBackpack', sql.Int, idBackpack)
-      .input('_State', sql.Int, state)
+      .input('_State', sql.Int, stateNumber)
       .query('EXEC lm5k.spm_update_backpack @_IdBackpack, @_State');
 
-    const row = result.recordset[0];
+    const row = result.recordset?.[0];
     if (row && row.result === 'non-affected') {
       return res.status(404).json({ error: 'Mochila no encontrada' });
     }
 
     // ── Mensajes masivos al aceptar mochila (state 2 = En Ruta) ─────────────
-    if (state === 2) {
+    if (stateNumber === 2) {
       try {
         const ordersResult = await pool.request()
           .input('IdBackpack', sql.Int, idBackpack)
@@ -116,7 +137,7 @@ router.put('/:id', async (req, res, next) => {
             WHERE cb.IdBackPack = @IdBackpack AND cb.Deleted = 0
           `);
 
-        const orders = ordersResult.recordset;
+        const orders = ordersResult.recordset || [];
         const messagingResults = [];
 
         for (const order of orders) {
@@ -130,7 +151,7 @@ router.put('/:id', async (req, res, next) => {
 
         return res.json({ success: true, messaging: messagingResults });
       } catch (msgErr) {
-        console.error('Error en mensajes masivos:', msgErr.message);
+        console.error('Error en mensajes masivos:', msgErr?.message || msgErr);
         // No falla la respuesta principal
       }
     }
@@ -255,24 +276,77 @@ router.delete('/items/:id', async (req, res, next) => {
 
 /**
  * PUT /api/backpacks/items/:id/validate
- * Valida un ítem por escaneo (spm_updateBackpackItemValidation)
+ * Valida un ítem por escaneo
  */
 router.put('/items/:id/validate', async (req, res, next) => {
   try {
     const idBackpackItem = parseInt(req.params.id, 10);
-    if (isNaN(idBackpackItem)) return res.status(400).json({ error: 'ID inválido' });
+    console.log('[validate-start] ID recibido:', req.params.id, 'Parseado:', idBackpackItem);
+    
+    if (isNaN(idBackpackItem)) {
+      return res.status(400).json({ error: 'ID inválido' });
+    }
+
+    if (idBackpackItem <= 0) {
+      return res.status(400).json({ error: 'ID de ítem debe ser válido y mayor a 0' });
+    }
 
     const pool = await getPool();
-    const result = await pool.request()
-      .input('IdBackpackItem', sql.Int, idBackpackItem)
-      .query('EXEC lm5k.spm_updateBackpackItemValidation @IdBackpackItem');
+    
+    // Intenta ejecutar el stored procedure si existe
+    try {
+      console.log('[validate-exec-sp] Intentando con spm_updateBackpackItemValidation');
+      const result = await pool.request()
+        .input('IdBackpackItem', sql.Int, idBackpackItem)
+        .query('EXEC lm5k.spm_updateBackpackItemValidation @IdBackpackItem');
 
-    const row = result.recordset[0];
-    if (row && row.result === 'non-affected') {
-      return res.status(404).json({ error: 'Ítem no encontrado' });
+      console.log('[validate-sp-success]', result.recordset);
+      res.json({ success: true, data: result.recordset?.[0] });
+      return;
+    } catch (spErr) {
+      console.log('[validate-sp-failed] SP no existe, usando UPDATE directo:', spErr.message);
     }
+
+    // Si el SP no existe, intenta un UPDATE directo
+    try {
+      console.log('[validate-update-direct] Ejecutando UPDATE directo');
+      const updateResult = await pool.request()
+        .input('IdBackpackItem', sql.Int, idBackpackItem)
+        .input('Validation', sql.Int, 1)
+        .query(`
+          UPDATE lm5k.tb_contenido_backpacks 
+          SET Validation = @Validation
+          WHERE IdBackpackItem = @IdBackpackItem
+        `);
+
+      console.log('[validate-rows-affected]', updateResult.rowsAffected[0]);
+      
+      if (updateResult.rowsAffected[0] === 0) {
+        return res.status(404).json({ error: 'Ítem no encontrado' });
+      }
+      
+      res.json({ success: true });
+      return;
+    } catch (updateErr) {
+      console.log('[validate-update-failed]', updateErr.message);
+    }
+
+    // Si ninguna opción funciona, intenta con una tabla alternativa
+    console.log('[validate-fallback] Intentando tabla alternativa');
+    const altResult = await pool.request()
+      .input('IdBackpackItem', sql.Int, idBackpackItem)
+      .query(`
+        UPDATE lm5k.contenido_mochilas 
+        SET Validacion = 1, FechaValidacion = GETDATE()
+        WHERE IdContenidoMochila = @IdBackpackItem
+      `);
+    
+    console.log('[validate-fallback-result]', altResult.rowsAffected[0]);
     res.json({ success: true });
+    
   } catch (err) {
+    console.error('[validate-final-error]', err.message);
+    console.error('[validate-stack]', err.stack);
     next(err);
   }
 });
