@@ -239,4 +239,81 @@ router.get('/:id/price-request', async (req, res, next) => {
   }
 });
 
+/**
+ * POST /api/orders/:id/evidencia
+ * Body: { idUsuario, nombreReceptor?, fotoBase64?, firmaBase64? }
+ * Guarda o actualiza la evidencia de entrega (foto + firma) de la orden
+ */
+router.post('/:id/evidencia', async (req, res, next) => {
+  try {
+    const idOrden = parseInt(req.params.id, 10);
+    if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
+
+    const { idUsuario, nombreReceptor = null, fotoBase64 = null, firmaBase64 = null } = req.body;
+    if (!idUsuario) return res.status(400).json({ error: 'idUsuario es requerido' });
+
+    const pool = await getPool();
+
+    // Si ya existe un registro para esta orden, actualizarlo (upsert)
+    const existing = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .query(`SELECT TOP 1 id FROM lm5k.tb_entregas_evidencia WHERE idOrden = @IdOrden AND deleted = 0`);
+
+    if (existing.recordset.length > 0) {
+      const existingId = existing.recordset[0].id;
+      await pool.request()
+        .input('Id', sql.Int, existingId)
+        .input('NombreReceptor', sql.NVarChar(200), nombreReceptor)
+        .input('FotoBase64', sql.VarChar(sql.MAX), fotoBase64)
+        .input('FirmaBase64', sql.VarChar(sql.MAX), firmaBase64)
+        .query(`UPDATE lm5k.tb_entregas_evidencia
+                SET nombreReceptor = @NombreReceptor,
+                    fotoBase64 = COALESCE(@FotoBase64, fotoBase64),
+                    firmaBase64 = COALESCE(@FirmaBase64, firmaBase64),
+                    lastModifiedDate = GETDATE()
+                WHERE id = @Id`);
+      return res.json({ success: true, updated: true });
+    }
+
+    // Insertar nuevo registro
+    const result = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .input('IdUsuario', sql.Int, idUsuario)
+      .input('NombreReceptor', sql.NVarChar(200), nombreReceptor)
+      .input('FotoBase64', sql.VarChar(sql.MAX), fotoBase64)
+      .input('FirmaBase64', sql.VarChar(sql.MAX), firmaBase64)
+      .query(`INSERT INTO lm5k.tb_entregas_evidencia
+                (idOrden, idUsuario, nombreReceptor, fotoBase64, firmaBase64, creationDate, lastModifiedDate, deleted)
+              OUTPUT INSERTED.id
+              VALUES (@IdOrden, @IdUsuario, @NombreReceptor, @FotoBase64, @FirmaBase64, GETDATE(), GETDATE(), 0)`);
+
+    res.status(201).json({ success: true, id: result.recordset[0]?.id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/orders/:id/evidencia
+ * Devuelve la evidencia de entrega guardada para la orden (si existe)
+ */
+router.get('/:id/evidencia', async (req, res, next) => {
+  try {
+    const idOrden = parseInt(req.params.id, 10);
+    if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
+
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .query(`SELECT TOP 1 id, idUsuario, nombreReceptor, fotoBase64, firmaBase64, creationDate
+              FROM lm5k.tb_entregas_evidencia
+              WHERE idOrden = @IdOrden AND deleted = 0
+              ORDER BY creationDate DESC`);
+
+    res.json(result.recordset[0] ?? null);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
