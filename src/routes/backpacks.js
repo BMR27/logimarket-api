@@ -220,15 +220,31 @@ router.get('/:id/items', async (req, res, next) => {
         const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
         if (ids) {
           const coordsResult = await pool.request()
-            .query(`SELECT id, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
+            .query(`SELECT id, Latitud, Longitud, Calle, NumExterior, Colonia, MunicipioDelegacion, Estado, CodigoPostal FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
           const coordMap = {};
           for (const row of coordsResult.recordset) {
-            coordMap[row.id] = { latitud: row.Latitud, longitud: row.Longitud };
+            coordMap[row.id] = {
+              latitud: row.Latitud,
+              longitud: row.Longitud,
+              calle: row.Calle,
+              numExterior: row.NumExterior,
+              colonia: row.Colonia,
+              municipio: row.MunicipioDelegacion,
+              estado: row.Estado,
+              codigoPostal: row.CodigoPostal,
+            };
           }
           for (const item of items) {
             const id = item.IdOrdenVenta || item.idOrdenVenta;
-            item.Latitud = coordMap[id]?.latitud ?? null;
-            item.Longitud = coordMap[id]?.longitud ?? null;
+            const d = coordMap[id];
+            item.Latitud = d?.latitud ?? null;
+            item.Longitud = d?.longitud ?? null;
+            item.Calle = d?.calle ?? null;
+            item.NumExterior = d?.numExterior ?? null;
+            item.Colonia = d?.colonia ?? null;
+            item.MunicipioDelegacion = d?.municipio ?? null;
+            item.Estado = d?.estado ?? null;
+            item.CodigoPostal = d?.codigoPostal ?? null;
           }
         }
       } catch (coordErr) {
@@ -298,15 +314,31 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
         const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
         if (ids) {
           const coordsResult = await pool.request()
-            .query(`SELECT id, Latitud, Longitud FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
+            .query(`SELECT id, Latitud, Longitud, Calle, NumExterior, Colonia, MunicipioDelegacion, Estado, CodigoPostal FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
           const coordMap = {};
           for (const row of coordsResult.recordset) {
-            coordMap[row.id] = { latitud: row.Latitud, longitud: row.Longitud };
+            coordMap[row.id] = {
+              latitud: row.Latitud,
+              longitud: row.Longitud,
+              calle: row.Calle,
+              numExterior: row.NumExterior,
+              colonia: row.Colonia,
+              municipio: row.MunicipioDelegacion,
+              estado: row.Estado,
+              codigoPostal: row.CodigoPostal,
+            };
           }
           for (const item of items) {
             const id = item.IdOrdenVenta || item.idOrdenVenta;
-            item.Latitud = coordMap[id]?.latitud ?? null;
-            item.Longitud = coordMap[id]?.longitud ?? null;
+            const d = coordMap[id];
+            item.Latitud = d?.latitud ?? null;
+            item.Longitud = d?.longitud ?? null;
+            item.Calle = d?.calle ?? null;
+            item.NumExterior = d?.numExterior ?? null;
+            item.Colonia = d?.colonia ?? null;
+            item.MunicipioDelegacion = d?.municipio ?? null;
+            item.Estado = d?.estado ?? null;
+            item.CodigoPostal = d?.codigoPostal ?? null;
           }
         }
       } catch (coordErr) {
