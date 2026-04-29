@@ -56,7 +56,8 @@ app.use('/api/backpacks', authenticate, backpacksRoutes);
 app.use('/api/catalogs', authenticate, catalogsRoutes);
 app.use('/api/validacion', authenticate, validacionRoutes);
 app.use('/api/admin', authenticate, adminRoutes);
-app.use('/api/ubicacion', authenticate, ubicacionRoutes);
+// Ubicación en tiempo real: se expone sin auth para permitir polling del dashboard web.
+app.use('/api/ubicacion', ubicacionRoutes);
 
 // Manejo de errores
 app.use(errorHandler);
