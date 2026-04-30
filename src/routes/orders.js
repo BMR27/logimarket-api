@@ -92,6 +92,37 @@ router.get('/ways', async (req, res, next) => {
 });
 
 /**
+ * GET /api/orders/:id/address
+ * Devuelve solo los campos de dirección de una orden directamente desde la tabla,
+ * sin filtro de equipo — útil para geocodificar en el mapa del repartidor.
+ */
+router.get('/:id/address', async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id) || id <= 0) return res.status(400).json({ error: 'ID inválido' });
+
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('Id', sql.Int, id)
+      .query(`
+        SELECT id, folioOrdenCliente,
+               calle, numExterior, numInterior, colonia,
+               municipioDelegacion, estado, codigoPostal,
+               Latitud, Longitud
+        FROM lm5k.OrdenesVenta
+        WHERE id = @Id AND ISNULL(deleted, 0) = 0
+      `);
+
+    if (!result.recordset.length) {
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
+    res.json(result.recordset[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * GET /api/orders/:id
  * Query params: equipos
  * Obtiene detalle completo de una orden (spm_get_order)
