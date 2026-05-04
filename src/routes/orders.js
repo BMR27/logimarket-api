@@ -168,11 +168,11 @@ router.get('/:id', async (req, res, next) => {
           CAST(ISNULL(ov.total, 0) AS FLOAT) AS total,
           ISNULL(ov.observacionesMensajero, '') AS observacionesMensajero,
           ISNULL(ov.idStatus, 0) AS idStatus,
-          0 AS idMotivoStatus,
-          0 AS idExplicacionMotivo,
+          ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
+          ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
           ISNULL(os.status, '') AS statusOrden,
-          '' AS motivoStatus,
-          '' AS explicacionMotivo,
+          ISNULL(ms.motivo, '') AS motivoStatus,
+          ISNULL(em.explicacion, '') AS explicacionMotivo,
           CONVERT(VARCHAR(19), ov.fechaPedido, 120) AS fechaPedido,
           CONVERT(VARCHAR(19), ov.fechaEntrega, 120) AS fechaEntrega,
           ov.Latitud,
@@ -182,6 +182,10 @@ router.get('/:id', async (req, res, next) => {
         FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
         LEFT JOIN lm5k.StatusOrdenes os WITH (NOLOCK)
           ON os.id = ov.idStatus
+        LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK)
+          ON ms.id = ov.idMotivoStatus
+        LEFT JOIN lm5k.ExplicacionesMotivo em WITH (NOLOCK)
+          ON em.id = ov.idExplicacionMotivo
         WHERE ov.id = @Id
           AND ISNULL(ov.deleted, 0) = 0
       `);
@@ -234,6 +238,9 @@ router.put('/:id', async (req, res, next) => {
     }
 
     const currentStatus = Number(currentOrderRes.recordset[0].idStatus || 0);
+    const safeStatus = Number(status);
+    const safeMotivoStatus = Number(motivoStatus) > 0 ? Number(motivoStatus) : null;
+    const safeExplicacionMotivo = Number(explicacionMotivo) > 0 ? Number(explicacionMotivo) : null;
 
     // Regla: no se puede calificar como Intento 2 sin pasar por Intento 1.
     // Verificar en historial legacy (OrdenesVenta_StatusHistorial) para no depender de tb_orden_status_historial
@@ -258,22 +265,63 @@ router.put('/:id', async (req, res, next) => {
     }
 
     // Actualizar la orden
-    const updateResult = await pool.request()
-      .input('Status', sql.Int, status)
-      .input('MotivoStatus', sql.Int, motivoStatus)
-      .input('ExplicacionMotivo', sql.Int, explicacionMotivo)
-      .input('IdUsuario', sql.Int, idUsuario)
-      .input('CurrentDate', sql.NVarChar(50), new Date().toISOString())
-      .input('IdOrden', sql.Int, idOrden)
-      .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
-      .input('Latitud', sql.NVarChar(50), latitud ? String(latitud) : null)
-      .input('Longitud', sql.NVarChar(50), longitud ? String(longitud) : null)
-      .input('Metros', sql.NVarChar(50), metros ? String(metros) : null)
-      .input('Tiempo', sql.NVarChar(50), tiempo ? String(tiempo) : null)
-      .query(`EXEC lm5k.spm_updateOrder @Status, @MotivoStatus, @ExplicacionMotivo,
-              @IdUsuario, @CurrentDate, @IdOrden, @FechaReagenda, @Latitud, @Longitud`);
+    let updateResult;
+    try {
+      updateResult = await pool.request()
+        .input('Status', sql.Int, safeStatus)
+        .input('MotivoStatus', sql.Int, safeMotivoStatus)
+        .input('ExplicacionMotivo', sql.Int, safeExplicacionMotivo)
+        .input('IdUsuario', sql.Int, idUsuario)
+        .input('CurrentDate', sql.NVarChar(50), new Date().toISOString())
+        .input('IdOrden', sql.Int, idOrden)
+        .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+        .input('Latitud', sql.NVarChar(50), latitud ? String(latitud) : null)
+        .input('Longitud', sql.NVarChar(50), longitud ? String(longitud) : null)
+        .input('Metros', sql.NVarChar(50), metros ? String(metros) : null)
+        .input('Tiempo', sql.NVarChar(50), tiempo ? String(tiempo) : null)
+        .query(`EXEC lm5k.spm_updateOrder @Status, @MotivoStatus, @ExplicacionMotivo,
+                @IdUsuario, @CurrentDate, @IdOrden, @FechaReagenda, @Latitud, @Longitud`);
+    } catch (spErr) {
+      // Fallback: persistir directamente en OrdenesVenta para no bloquear guardado de motivo/status
+      console.error('[spm_updateOrder] fallback update OrdenesVenta:', spErr?.message);
+      const fallbackResult = await pool.request()
+        .input('IdOrden', sql.Int, idOrden)
+        .input('Status', sql.Int, safeStatus)
+        .input('MotivoStatus', sql.Int, safeMotivoStatus)
+        .query(`
+          UPDATE lm5k.OrdenesVenta
+          SET
+            idStatus = @Status,
+            idMotivoStatus = @MotivoStatus,
+            lastModifiedDate = GETDATE()
+          WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
+        `);
 
-    const updateRow = updateResult.recordset[0];
+      // Intentar columnas opcionales sin romper el flujo si no existen en el ambiente.
+      try {
+        await pool.request()
+          .input('IdOrden', sql.Int, idOrden)
+          .input('ExplicacionMotivo', sql.Int, safeExplicacionMotivo)
+          .input('IdUsuario', sql.Int, idUsuario)
+          .query(`
+            UPDATE lm5k.OrdenesVenta
+            SET idExplicacionMotivo = @ExplicacionMotivo,
+                modifiedById = @IdUsuario,
+                lastModifiedDate = GETDATE()
+            WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
+          `);
+      } catch (_) {
+        // columnas no disponibles en el ambiente legacy
+      }
+
+      if (!fallbackResult.rowsAffected || fallbackResult.rowsAffected[0] === 0) {
+        throw spErr;
+      }
+
+      updateResult = { recordset: [] };
+    }
+
+    const updateRow = updateResult?.recordset?.[0];
     if (updateRow && updateRow.result === 'non-affected') {
       return res.status(404).json({ error: 'Orden no encontrada o sin cambios' });
     }
@@ -290,15 +338,15 @@ router.put('/:id', async (req, res, next) => {
     // Guardar historial de calificación solo cuando hay cambio real de status.
     // Envuelto en try-catch para que un fallo de permisos en tb_orden_status_historial
     // no rompa el guardado de la orden.
-    if (currentStatus !== Number(status)) {
+    if (currentStatus !== safeStatus) {
       try {
         await ensureOrderStatusHistoryTable(pool);
         await pool.request()
           .input('IdOrden', sql.Int, idOrden)
           .input('IdStatusAnterior', sql.Int, currentStatus)
-          .input('IdStatusNuevo', sql.Int, Number(status))
-          .input('IdMotivoStatus', sql.Int, Number(motivoStatus || 0) || null)
-          .input('IdExplicacionMotivo', sql.Int, Number(explicacionMotivo || 0) || null)
+          .input('IdStatusNuevo', sql.Int, safeStatus)
+          .input('IdMotivoStatus', sql.Int, safeMotivoStatus)
+          .input('IdExplicacionMotivo', sql.Int, safeExplicacionMotivo)
           .input('IdUsuario', sql.Int, idUsuario)
           .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
           .query(`
