@@ -139,8 +139,35 @@ router.get('/:id', async (req, res, next) => {
       .input('Id', sql.Int, id)
       .query('EXEC lm5k.spm_get_order @equipos, @Id');
 
+    const enrichMotivoFromOrdenVenta = async (baseRow) => {
+      const motivoRes = await pool.request()
+        .input('Id', sql.Int, id)
+        .query(`
+          SELECT TOP 1
+            ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
+            ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
+            ISNULL(ms.motivo, '') AS motivoStatus,
+            ISNULL(em.explicacion, '') AS explicacionMotivo
+          FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+          LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK) ON ms.id = ov.idMotivoStatus
+          LEFT JOIN lm5k.ExplicacionesMotivo em WITH (NOLOCK) ON em.id = ov.idExplicacionMotivo
+          WHERE ov.id = @Id AND ISNULL(ov.deleted, 0) = 0
+        `);
+
+      if (!motivoRes.recordset.length) return baseRow;
+      const m = motivoRes.recordset[0];
+      return {
+        ...baseRow,
+        idMotivoStatus: Number(m.idMotivoStatus || 0),
+        idExplicacionMotivo: Number(m.idExplicacionMotivo || 0),
+        motivoStatus: m.motivoStatus || '',
+        explicacionMotivo: m.explicacionMotivo || '',
+      };
+    };
+
     if (result.recordset.length) {
-      return res.json(result.recordset[0]);
+      const enriched = await enrichMotivoFromOrdenVenta(result.recordset[0]);
+      return res.json(enriched);
     }
 
     // Fallback: si el SP no encuentra por filtro de equipos, intentar por ID directo.
@@ -194,7 +221,8 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
 
-    res.json(fallback.recordset[0]);
+    const enrichedFallback = await enrichMotivoFromOrdenVenta(fallback.recordset[0]);
+    res.json(enrichedFallback);
   } catch (err) {
     next(err);
   }
