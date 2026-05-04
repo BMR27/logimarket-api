@@ -477,14 +477,24 @@ router.get('/:id/evidencia', async (req, res, next) => {
  */
 router.get('/:id/status-history', async (req, res, next) => {
   try {
-    const idOrden = parseInt(req.params.id, 10);
+    const rawId = String(req.params.id || '').trim();
+    const idOrden = parseInt(rawId, 10);
     if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
 
     const pool = await getPool();
 
     const result = await pool.request()
       .input('IdOrden', sql.Int, idOrden)
+      .input('FolioOrden', sql.NVarChar(100), rawId)
       .query(`
+        ;WITH target_order AS (
+          SELECT TOP 1
+            ov.id,
+            ISNULL(ov.folioOrdenCliente, '') AS folioOrdenCliente
+          FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+          WHERE ISNULL(ov.deleted, 0) = 0
+            AND (ov.id = @IdOrden OR ov.folioOrdenCliente = @FolioOrden)
+        )
         SELECT
           h2.idHistorial AS id,
           h2.idOrdenVenta AS idOrden,
@@ -502,7 +512,15 @@ router.get('/:id/status-history', async (req, res, next) => {
         FROM lm5k.OrdenesVenta_StatusHistorial h2
         LEFT JOIN lm5k.StatusOrdenes sa2 ON sa2.id = h2.statusAnterior
         LEFT JOIN lm5k.StatusOrdenes sn2 ON sn2.id = h2.statusNuevo
-        WHERE h2.idOrdenVenta = @IdOrden
+        WHERE EXISTS (SELECT 1 FROM target_order)
+          AND (
+            h2.idOrdenVenta IN (SELECT id FROM target_order)
+            OR h2.folioOrdenCliente IN (
+              SELECT folioOrdenCliente
+              FROM target_order
+              WHERE folioOrdenCliente <> ''
+            )
+          )
 
         UNION ALL
 
@@ -526,7 +544,7 @@ router.get('/:id/status-history', async (req, res, next) => {
         LEFT JOIN lm5k.MotivosStatus ms ON ms.id = h.idMotivoStatus
         LEFT JOIN lm5k.ExplicacionesMotivo em ON em.id = h.idExplicacionMotivo
         WHERE OBJECT_ID(N'lm5k.tb_orden_status_historial', N'U') IS NOT NULL
-          AND h.idOrden = @IdOrden
+          AND h.idOrden IN (SELECT id FROM target_order)
 
         ORDER BY creationDate DESC, id DESC
       `);
