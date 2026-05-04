@@ -140,29 +140,52 @@ router.get('/:id', async (req, res, next) => {
       .query('EXEC lm5k.spm_get_order @equipos, @Id');
 
     const enrichMotivoFromOrdenVenta = async (baseRow) => {
-      const motivoRes = await pool.request()
-        .input('Id', sql.Int, id)
-        .query(`
-          SELECT TOP 1
-            ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
-            ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
-            ISNULL(ms.motivo, '') AS motivoStatus,
-            ISNULL(em.explicacion, '') AS explicacionMotivo
-          FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
-          LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK) ON ms.id = ov.idMotivoStatus
-          LEFT JOIN lm5k.ExplicacionesMotivo em WITH (NOLOCK) ON em.id = ov.idExplicacionMotivo
-          WHERE ov.id = @Id AND ISNULL(ov.deleted, 0) = 0
-        `);
+      try {
+        let motivoRes;
+        try {
+          motivoRes = await pool.request()
+            .input('Id', sql.Int, id)
+            .query(`
+              SELECT TOP 1
+                ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
+                ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
+                ISNULL(ms.motivo, '') AS motivoStatus,
+                ISNULL(em.explicacion, '') AS explicacionMotivo
+              FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+              LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK) ON ms.id = ov.idMotivoStatus
+              LEFT JOIN lm5k.ExplicacionesMotivo em WITH (NOLOCK) ON em.id = ov.idExplicacionMotivo
+              WHERE ov.id = @Id AND ISNULL(ov.deleted, 0) = 0
+            `);
+        } catch (_) {
+          // Algunos ambientes usan el nombre plural ExplicacionesMotivos
+          motivoRes = await pool.request()
+            .input('Id', sql.Int, id)
+            .query(`
+              SELECT TOP 1
+                ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
+                ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
+                ISNULL(ms.motivo, '') AS motivoStatus,
+                ISNULL(em.explicacion, '') AS explicacionMotivo
+              FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+              LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK) ON ms.id = ov.idMotivoStatus
+              LEFT JOIN lm5k.ExplicacionesMotivos em WITH (NOLOCK) ON em.id = ov.idExplicacionMotivo
+              WHERE ov.id = @Id AND ISNULL(ov.deleted, 0) = 0
+            `);
+        }
 
-      if (!motivoRes.recordset.length) return baseRow;
-      const m = motivoRes.recordset[0];
-      return {
-        ...baseRow,
-        idMotivoStatus: Number(m.idMotivoStatus || 0),
-        idExplicacionMotivo: Number(m.idExplicacionMotivo || 0),
-        motivoStatus: m.motivoStatus || '',
-        explicacionMotivo: m.explicacionMotivo || '',
-      };
+        if (!motivoRes.recordset.length) return baseRow;
+        const m = motivoRes.recordset[0];
+        return {
+          ...baseRow,
+          idMotivoStatus: Number(m.idMotivoStatus || 0),
+          idExplicacionMotivo: Number(m.idExplicacionMotivo || 0),
+          motivoStatus: m.motivoStatus || '',
+          explicacionMotivo: m.explicacionMotivo || '',
+        };
+      } catch (err) {
+        console.error('[orders/:id] enrichMotivoFromOrdenVenta fallo:', err?.message || err);
+        return baseRow;
+      }
     };
 
     if (result.recordset.length) {
@@ -199,7 +222,7 @@ router.get('/:id', async (req, res, next) => {
           ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
           ISNULL(os.status, '') AS statusOrden,
           ISNULL(ms.motivo, '') AS motivoStatus,
-          ISNULL(em.explicacion, '') AS explicacionMotivo,
+          '' AS explicacionMotivo,
           CONVERT(VARCHAR(19), ov.fechaPedido, 120) AS fechaPedido,
           CONVERT(VARCHAR(19), ov.fechaEntrega, 120) AS fechaEntrega,
           ov.Latitud,
@@ -211,8 +234,6 @@ router.get('/:id', async (req, res, next) => {
           ON os.id = ov.idStatus
         LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK)
           ON ms.id = ov.idMotivoStatus
-        LEFT JOIN lm5k.ExplicacionesMotivo em WITH (NOLOCK)
-          ON em.id = ov.idExplicacionMotivo
         WHERE ov.id = @Id
           AND ISNULL(ov.deleted, 0) = 0
       `);
