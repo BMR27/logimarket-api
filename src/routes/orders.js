@@ -139,10 +139,58 @@ router.get('/:id', async (req, res, next) => {
       .input('Id', sql.Int, id)
       .query('EXEC lm5k.spm_get_order @equipos, @Id');
 
-    if (!result.recordset.length) {
+    if (result.recordset.length) {
+      return res.json(result.recordset[0]);
+    }
+
+    // Fallback: si el SP no encuentra por filtro de equipos, intentar por ID directo.
+    // Esto evita falsos 404 para órdenes válidas visibles en mochila/entregas.
+    const fallback = await pool.request()
+      .input('Id', sql.Int, id)
+      .query(`
+        SELECT TOP 1
+          ov.id,
+          ISNULL(ov.folioOrdenCliente, '') AS folioOrdenCliente,
+          ISNULL(ov.cliente, '') AS cliente,
+          ISNULL(ov.telefonoPrincipal, '') AS telefonoPrincipal,
+          ISNULL(ov.telefonoOpcional, '') AS telefonoOpcional,
+          ISNULL(ov.codigoPostal, '') AS codigoPostal,
+          ISNULL(ov.estado, '') AS estado,
+          ISNULL(ov.municipioDelegacion, '') AS municipioDelegacion,
+          ISNULL(ov.colonia, '') AS colonia,
+          ISNULL(ov.calle, '') AS calle,
+          ISNULL(ov.numExterior, '') AS numExterior,
+          ISNULL(ov.numInterior, '') AS numInterior,
+          ISNULL(ov.entreCalles, '') AS entreCalles,
+          ISNULL(ov.referencias, '') AS referencias,
+          ISNULL(ov.descripcionFachada, '') AS descripcionFachada,
+          ISNULL(ov.notas, '') AS notas,
+          CAST(ISNULL(ov.total, 0) AS FLOAT) AS total,
+          ISNULL(ov.observacionesMensajero, '') AS observacionesMensajero,
+          ISNULL(ov.idStatus, 0) AS idStatus,
+          0 AS idMotivoStatus,
+          0 AS idExplicacionMotivo,
+          ISNULL(os.status, '') AS statusOrden,
+          '' AS motivoStatus,
+          '' AS explicacionMotivo,
+          CONVERT(VARCHAR(19), ov.fechaPedido, 120) AS fechaPedido,
+          CONVERT(VARCHAR(19), ov.fechaEntrega, 120) AS fechaEntrega,
+          ov.Latitud,
+          ov.Longitud,
+          ov.Metros,
+          ov.Tiempo
+        FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+        LEFT JOIN lm5k.StatusOrdenes os WITH (NOLOCK)
+          ON os.id = ov.idStatus
+        WHERE ov.id = @Id
+          AND ISNULL(ov.deleted, 0) = 0
+      `);
+
+    if (!fallback.recordset.length) {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
-    res.json(result.recordset[0]);
+
+    res.json(fallback.recordset[0]);
   } catch (err) {
     next(err);
   }
@@ -458,7 +506,29 @@ router.get('/:id/status-history', async (req, res, next) => {
         LEFT JOIN lm5k.MotivosStatus ms ON ms.id = h.idMotivoStatus
         LEFT JOIN lm5k.ExplicacionesMotivo em ON em.id = h.idExplicacionMotivo
         WHERE h.idOrden = @IdOrden
-        ORDER BY h.creationDate DESC, h.id DESC
+
+        UNION ALL
+
+        SELECT
+          h2.idHistorial AS id,
+          h2.idOrdenVenta AS idOrden,
+          h2.statusAnterior AS idStatusAnterior,
+          h2.statusNuevo AS idStatusNuevo,
+          NULL AS idMotivoStatus,
+          NULL AS idExplicacionMotivo,
+          NULL AS idUsuario,
+          NULL AS fechaReagenda,
+          h2.fechaModificacion AS creationDate,
+          sa2.status AS statusAnterior,
+          sn2.status AS statusNuevo,
+          h2.motivoCambio AS motivoStatus,
+          NULL AS explicacionMotivo
+        FROM lm5k.OrdenesVenta_StatusHistorial h2
+        LEFT JOIN lm5k.StatusOrdenes sa2 ON sa2.id = h2.statusAnterior
+        LEFT JOIN lm5k.StatusOrdenes sn2 ON sn2.id = h2.statusNuevo
+        WHERE h2.idOrdenVenta = @IdOrden
+
+        ORDER BY creationDate DESC, id DESC
       `);
 
     res.json(result.recordset);

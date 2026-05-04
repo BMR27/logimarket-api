@@ -3,6 +3,33 @@ const { getPool, sql } = require('../config/database');
 
 const router = express.Router();
 
+async function getBlockingBackpacks(pool, idRepartidor, excludeBackpackId = null) {
+  const request = pool.request().input('IdRepartidor', sql.Int, Number(idRepartidor));
+  if (excludeBackpackId) {
+    request.input('ExcludeBackpackId', sql.Int, Number(excludeBackpackId));
+  }
+
+  const result = await request.query(`
+    SELECT
+      b.Id,
+      b.State,
+      SUM(CASE WHEN cb.IdOrdenVenta IS NOT NULL AND ISNULL(cb.Validation, 0) <> 1 THEN 1 ELSE 0 END) AS pendientesRetorno
+    FROM lm5k.tb_backpacks b WITH (NOLOCK)
+    LEFT JOIN lm5k.tb_contenido_backpacks cb WITH (NOLOCK)
+      ON cb.IdBackPack = b.Id AND ISNULL(cb.Deleted, 0) = 0
+    WHERE ISNULL(b.Deleted, 0) = 0
+      AND b.IdRepartidor = @IdRepartidor
+      ${excludeBackpackId ? 'AND b.Id <> @ExcludeBackpackId' : ''}
+    GROUP BY b.Id, b.State
+    HAVING
+      b.State IN (1, 2)
+      OR (b.State = 3 AND SUM(CASE WHEN cb.IdOrdenVenta IS NOT NULL AND ISNULL(cb.Validation, 0) <> 1 THEN 1 ELSE 0 END) > 0)
+    ORDER BY b.Id DESC
+  `);
+
+  return result.recordset || [];
+}
+
 // ── Utilidad: envío de mensaje WhatsApp/SMS por número ──────────────────────
 // Configura TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM en Railway para activar envíos reales.
 // Si no están configuradas, solo loguea.
@@ -38,12 +65,24 @@ router.get('/:idUsuario', async (req, res, next) => {
   try {
     const idUsuario = parseInt(req.params.idUsuario, 10);
     if (isNaN(idUsuario)) return res.status(400).json({ error: 'IdUsuario inválido' });
+    const includeClosed = String(req.query.includeClosed || '0') === '1';
 
     const pool = await getPool();
     const result = await pool.request()
       .input('IdUsuario', sql.Int, idUsuario)
       .query('EXEC lm5k.spm_getBackpacks @IdUsuario');
-    res.json(result.recordset);
+
+    const backpacks = result.recordset || [];
+    const blocking = await getBlockingBackpacks(pool, idUsuario);
+    const blockingIds = new Set(blocking.map((b) => Number(b.Id || 0)).filter((id) => id > 0));
+    const filtered = includeClosed
+      ? backpacks
+      : backpacks.filter((b) => {
+          const id = Number(b.Id ?? b.id ?? 0);
+          return blockingIds.has(id);
+        });
+
+    res.json(filtered);
   } catch (err) {
     next(err);
   }
@@ -63,6 +102,15 @@ router.post('/', async (req, res, next) => {
 
     const fechaActual = new Date().toISOString().slice(0, 10);
     const pool = await getPool();
+
+    const blockingBackpacks = await getBlockingBackpacks(pool, idRepartidor);
+    if (blockingBackpacks.length > 0) {
+      return res.status(409).json({
+        error: 'El mensajero seleccionado tiene una Mochila Activa, favor de validar para continuar',
+        code: 'MOCHILA_PENDIENTE',
+      });
+    }
+
     const result = await pool.request()
       .input('IdRepartidor', sql.Int, idRepartidor)
       .input('IdLider', sql.Int, idLider)
@@ -98,6 +146,31 @@ router.put('/:id', async (req, res, next) => {
     }
 
     const pool = await getPool();
+
+    if (stateNumber === 2) {
+      const currentBackpackRes = await pool.request()
+        .input('IdBackpack', sql.Int, idBackpack)
+        .query(`
+          SELECT Id, IdRepartidor
+          FROM lm5k.tb_backpacks
+          WHERE Id = @IdBackpack AND ISNULL(Deleted, 0) = 0
+        `);
+
+      if (!currentBackpackRes.recordset.length) {
+        return res.status(404).json({ error: 'Mochila no encontrada' });
+      }
+
+      const idRepartidor = Number(currentBackpackRes.recordset[0].IdRepartidor ?? 0);
+      if (idRepartidor > 0) {
+        const blockingBackpacks = await getBlockingBackpacks(pool, idRepartidor, idBackpack);
+        if (blockingBackpacks.length > 0) {
+          return res.status(409).json({
+            error: 'El mensajero seleccionado tiene una Mochila Activa, favor de validar para continuar',
+            code: 'MOCHILA_PENDIENTE',
+          });
+        }
+      }
+    }
 
     if (stateNumber === 3) {
       // Valida contra la tabla base para que coincida con el flujo de escaneo por folio.
@@ -269,11 +342,33 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
     if (isNaN(idRepartidor)) return res.status(400).json({ error: 'IdRepartidor inválido' });
 
     const pool = await getPool();
+    const activeBpRes = await pool.request()
+      .input('IdUsuario', sql.Int, idRepartidor)
+      .query('EXEC lm5k.spm_getBackpacks @IdUsuario');
+
+    const activeBackpackIds = new Set(
+      (activeBpRes.recordset || [])
+        .filter((b) => {
+          const state = Number(b.State ?? b.state ?? 0);
+          return state === 1 || state === 2;
+        })
+        .map((b) => Number(b.Id ?? b.id ?? 0))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    );
+
     const result = await pool.request()
       .input('IdRepartidor', sql.Int, idRepartidor)
       .query('EXEC lm5k.spm_getBackpackItemsForDeliver @IdRepartidor');
 
-    const items = result.recordset;
+    let items = result.recordset || [];
+    if (activeBackpackIds.size > 0) {
+      items = items.filter((item) => {
+        const idBackpack = Number(item.IdBackPack ?? item.IdBackpack ?? item.idBackpack ?? 0);
+        return activeBackpackIds.has(idBackpack);
+      });
+    } else {
+      items = [];
+    }
 
     // Fuerza Validation desde tabla base para que el mensajero vea estado persistente.
     if (items.length > 0) {
