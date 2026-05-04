@@ -481,11 +481,31 @@ router.get('/:id/status-history', async (req, res, next) => {
     if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
 
     const pool = await getPool();
-    await ensureOrderStatusHistoryTable(pool);
 
     const result = await pool.request()
       .input('IdOrden', sql.Int, idOrden)
       .query(`
+        SELECT
+          h2.idHistorial AS id,
+          h2.idOrdenVenta AS idOrden,
+          h2.statusAnterior AS idStatusAnterior,
+          h2.statusNuevo AS idStatusNuevo,
+          NULL AS idMotivoStatus,
+          NULL AS idExplicacionMotivo,
+          NULL AS idUsuario,
+          NULL AS fechaReagenda,
+          h2.fechaModificacion AS creationDate,
+          sa2.status AS statusAnterior,
+          sn2.status AS statusNuevo,
+          h2.motivoCambio AS motivoStatus,
+          NULL AS explicacionMotivo
+        FROM lm5k.OrdenesVenta_StatusHistorial h2
+        LEFT JOIN lm5k.StatusOrdenes sa2 ON sa2.id = h2.statusAnterior
+        LEFT JOIN lm5k.StatusOrdenes sn2 ON sn2.id = h2.statusNuevo
+        WHERE h2.idOrdenVenta = @IdOrden
+
+        UNION ALL
+
         SELECT
           h.id,
           h.idOrden,
@@ -505,28 +525,8 @@ router.get('/:id/status-history', async (req, res, next) => {
         LEFT JOIN lm5k.StatusOrdenes sn ON sn.id = h.idStatusNuevo
         LEFT JOIN lm5k.MotivosStatus ms ON ms.id = h.idMotivoStatus
         LEFT JOIN lm5k.ExplicacionesMotivo em ON em.id = h.idExplicacionMotivo
-        WHERE h.idOrden = @IdOrden
-
-        UNION ALL
-
-        SELECT
-          h2.idHistorial AS id,
-          h2.idOrdenVenta AS idOrden,
-          h2.statusAnterior AS idStatusAnterior,
-          h2.statusNuevo AS idStatusNuevo,
-          NULL AS idMotivoStatus,
-          NULL AS idExplicacionMotivo,
-          NULL AS idUsuario,
-          NULL AS fechaReagenda,
-          h2.fechaModificacion AS creationDate,
-          sa2.status AS statusAnterior,
-          sn2.status AS statusNuevo,
-          h2.motivoCambio AS motivoStatus,
-          NULL AS explicacionMotivo
-        FROM lm5k.OrdenesVenta_StatusHistorial h2
-        LEFT JOIN lm5k.StatusOrdenes sa2 ON sa2.id = h2.statusAnterior
-        LEFT JOIN lm5k.StatusOrdenes sn2 ON sn2.id = h2.statusNuevo
-        WHERE h2.idOrdenVenta = @IdOrden
+        WHERE OBJECT_ID(N'lm5k.tb_orden_status_historial', N'U') IS NOT NULL
+          AND h.idOrden = @IdOrden
 
         ORDER BY creationDate DESC, id DESC
       `);
