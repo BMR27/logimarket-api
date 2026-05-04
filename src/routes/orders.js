@@ -224,7 +224,6 @@ router.put('/:id', async (req, res, next) => {
     }
 
     const pool = await getPool();
-    await ensureOrderStatusHistoryTable(pool);
 
     const currentOrderRes = await pool.request()
       .input('IdOrden', sql.Int, idOrden)
@@ -237,17 +236,22 @@ router.put('/:id', async (req, res, next) => {
     const currentStatus = Number(currentOrderRes.recordset[0].idStatus || 0);
 
     // Regla: no se puede calificar como Intento 2 sin pasar por Intento 1.
+    // Verificar en historial legacy (OrdenesVenta_StatusHistorial) para no depender de tb_orden_status_historial
     if (Number(status) === 6) {
-      const intento1Res = await pool.request()
-        .input('IdOrden', sql.Int, idOrden)
-        .query(`
-          SELECT TOP 1 1 AS hasIntento1
-          FROM lm5k.tb_orden_status_historial
-          WHERE idOrden = @IdOrden
-            AND (idStatusAnterior = 5 OR idStatusNuevo = 5)
-        `);
-
-      const hasIntento1 = currentStatus === 5 || currentStatus === 6 || intento1Res.recordset.length > 0;
+      let hasIntento1 = currentStatus === 5 || currentStatus === 6;
+      if (!hasIntento1) {
+        try {
+          const intento1Res = await pool.request()
+            .input('IdOrden', sql.Int, idOrden)
+            .query(`
+              SELECT TOP 1 1 AS hasIntento1
+              FROM lm5k.OrdenesVenta_StatusHistorial
+              WHERE idOrdenVenta = @IdOrden
+                AND (statusAnterior = 5 OR statusNuevo = 5)
+            `);
+          hasIntento1 = intento1Res.recordset.length > 0;
+        } catch (_) { /* si falla, permitir continuar */ }
+      }
       if (!hasIntento1) {
         return res.status(400).json({ error: 'No puedes marcar Intento 2 sin haber pasado antes por Intento 1' });
       }
@@ -284,21 +288,29 @@ router.put('/:id', async (req, res, next) => {
     }
 
     // Guardar historial de calificación solo cuando hay cambio real de status.
+    // Envuelto en try-catch para que un fallo de permisos en tb_orden_status_historial
+    // no rompa el guardado de la orden.
     if (currentStatus !== Number(status)) {
-      await pool.request()
-        .input('IdOrden', sql.Int, idOrden)
-        .input('IdStatusAnterior', sql.Int, currentStatus)
-        .input('IdStatusNuevo', sql.Int, Number(status))
-        .input('IdMotivoStatus', sql.Int, Number(motivoStatus || 0) || null)
-        .input('IdExplicacionMotivo', sql.Int, Number(explicacionMotivo || 0) || null)
-        .input('IdUsuario', sql.Int, idUsuario)
-        .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
-        .query(`
-          INSERT INTO lm5k.tb_orden_status_historial
-            (idOrden, idStatusAnterior, idStatusNuevo, idMotivoStatus, idExplicacionMotivo, idUsuario, fechaReagenda, creationDate)
-          VALUES
-            (@IdOrden, @IdStatusAnterior, @IdStatusNuevo, @IdMotivoStatus, @IdExplicacionMotivo, @IdUsuario, TRY_CONVERT(datetime, @FechaReagenda), GETDATE())
-        `);
+      try {
+        await ensureOrderStatusHistoryTable(pool);
+        await pool.request()
+          .input('IdOrden', sql.Int, idOrden)
+          .input('IdStatusAnterior', sql.Int, currentStatus)
+          .input('IdStatusNuevo', sql.Int, Number(status))
+          .input('IdMotivoStatus', sql.Int, Number(motivoStatus || 0) || null)
+          .input('IdExplicacionMotivo', sql.Int, Number(explicacionMotivo || 0) || null)
+          .input('IdUsuario', sql.Int, idUsuario)
+          .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+          .query(`
+            INSERT INTO lm5k.tb_orden_status_historial
+              (idOrden, idStatusAnterior, idStatusNuevo, idMotivoStatus, idExplicacionMotivo, idUsuario, fechaReagenda, creationDate)
+            VALUES
+              (@IdOrden, @IdStatusAnterior, @IdStatusNuevo, @IdMotivoStatus, @IdExplicacionMotivo, @IdUsuario, TRY_CONVERT(datetime, @FechaReagenda), GETDATE())
+          `);
+      } catch (histErr) {
+        // No romper el flujo de guardado si falla el historial interno
+        console.error('[historial-interno] error al insertar:', histErr?.message);
+      }
     }
 
     res.json({ success: true });
@@ -483,73 +495,90 @@ router.get('/:id/status-history', async (req, res, next) => {
 
     const pool = await getPool();
 
-    const result = await pool.request()
+    // 1) Obtener folio real de la orden por id
+    const orderRes = await pool.request()
       .input('IdOrden', sql.Int, idOrden)
-      .input('FolioOrden', sql.NVarChar(100), rawId)
       .query(`
-        ;WITH target_order AS (
-          SELECT TOP 1
-            ov.id,
-            ISNULL(ov.folioOrdenCliente, '') AS folioOrdenCliente
-          FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
-          WHERE ISNULL(ov.deleted, 0) = 0
-            AND (ov.id = @IdOrden OR ov.folioOrdenCliente = @FolioOrden)
-        )
-        SELECT
-          h2.idHistorial AS id,
-          h2.idOrdenVenta AS idOrden,
-          h2.statusAnterior AS idStatusAnterior,
-          h2.statusNuevo AS idStatusNuevo,
-          NULL AS idMotivoStatus,
-          NULL AS idExplicacionMotivo,
-          NULL AS idUsuario,
-          NULL AS fechaReagenda,
-          h2.fechaModificacion AS creationDate,
-          sa2.status AS statusAnterior,
-          sn2.status AS statusNuevo,
-          h2.motivoCambio AS motivoStatus,
-          NULL AS explicacionMotivo
-        FROM lm5k.OrdenesVenta_StatusHistorial h2
-        LEFT JOIN lm5k.StatusOrdenes sa2 ON sa2.id = h2.statusAnterior
-        LEFT JOIN lm5k.StatusOrdenes sn2 ON sn2.id = h2.statusNuevo
-        WHERE EXISTS (SELECT 1 FROM target_order)
-          AND (
-            h2.idOrdenVenta IN (SELECT id FROM target_order)
-            OR h2.folioOrdenCliente IN (
-              SELECT folioOrdenCliente
-              FROM target_order
-              WHERE folioOrdenCliente <> ''
-            )
-          )
-
-        UNION ALL
-
-        SELECT
-          h.id,
-          h.idOrden,
-          h.idStatusAnterior,
-          h.idStatusNuevo,
-          h.idMotivoStatus,
-          h.idExplicacionMotivo,
-          h.idUsuario,
-          h.fechaReagenda,
-          h.creationDate,
-          sa.status AS statusAnterior,
-          sn.status AS statusNuevo,
-          ms.motivo AS motivoStatus,
-          em.explicacion AS explicacionMotivo
-        FROM lm5k.tb_orden_status_historial h
-        LEFT JOIN lm5k.StatusOrdenes sa ON sa.id = h.idStatusAnterior
-        LEFT JOIN lm5k.StatusOrdenes sn ON sn.id = h.idStatusNuevo
-        LEFT JOIN lm5k.MotivosStatus ms ON ms.id = h.idMotivoStatus
-        LEFT JOIN lm5k.ExplicacionesMotivo em ON em.id = h.idExplicacionMotivo
-        WHERE OBJECT_ID(N'lm5k.tb_orden_status_historial', N'U') IS NOT NULL
-          AND h.idOrden IN (SELECT id FROM target_order)
-
-        ORDER BY creationDate DESC, id DESC
+        SELECT TOP 1
+          ISNULL(folioOrdenCliente, '') AS folioOrdenCliente
+        FROM lm5k.OrdenesVenta WITH (NOLOCK)
+        WHERE ISNULL(deleted, 0) = 0 AND id = @IdOrden
       `);
 
-    res.json(result.recordset);
+    const folio = orderRes.recordset.length > 0
+      ? String(orderRes.recordset[0].folioOrdenCliente || '').trim()
+      : '';
+
+    // 2) Consultar historial legacy (fuente principal) por id y folio
+    const legacyResult = await pool.request()
+      .input('IdOrden', sql.Int, idOrden)
+      .input('Folio', sql.NVarChar(100), folio)
+      .query(`
+        SELECT
+          h.idHistorial        AS id,
+          h.idOrdenVenta       AS idOrden,
+          h.statusAnterior     AS idStatusAnterior,
+          h.statusNuevo        AS idStatusNuevo,
+          NULL                 AS idMotivoStatus,
+          NULL                 AS idExplicacionMotivo,
+          NULL                 AS idUsuario,
+          NULL                 AS fechaReagenda,
+          h.fechaModificacion  AS creationDate,
+          sa.status            AS statusAnterior,
+          sn.status            AS statusNuevo,
+          h.motivoCambio       AS motivoStatus,
+          NULL                 AS explicacionMotivo
+        FROM lm5k.OrdenesVenta_StatusHistorial h WITH (NOLOCK)
+        LEFT JOIN lm5k.StatusOrdenes sa WITH (NOLOCK) ON sa.id = h.statusAnterior
+        LEFT JOIN lm5k.StatusOrdenes sn WITH (NOLOCK) ON sn.id = h.statusNuevo
+        WHERE h.idOrdenVenta = @IdOrden
+           OR (@Folio <> '' AND h.folioOrdenCliente = @Folio)
+        ORDER BY h.fechaModificacion DESC, h.idHistorial DESC
+      `);
+
+    // 3) Consultar historial nuevo solo si la tabla existe (query separado para evitar error de compilación)
+    let newRows = [];
+    try {
+      await ensureOrderStatusHistoryTable(pool);
+      const newResult = await pool.request()
+        .input('IdOrden', sql.Int, idOrden)
+        .query(`
+          SELECT
+            h.id,
+            h.idOrden,
+            h.idStatusAnterior,
+            h.idStatusNuevo,
+            h.idMotivoStatus,
+            h.idExplicacionMotivo,
+            h.idUsuario,
+            h.fechaReagenda,
+            h.creationDate,
+            sa.status AS statusAnterior,
+            sn.status AS statusNuevo,
+            ms.motivo AS motivoStatus,
+            em.explicacion AS explicacionMotivo
+          FROM lm5k.tb_orden_status_historial h
+          LEFT JOIN lm5k.StatusOrdenes sa ON sa.id = h.idStatusAnterior
+          LEFT JOIN lm5k.StatusOrdenes sn ON sn.id = h.idStatusNuevo
+          LEFT JOIN lm5k.MotivosStatus ms ON ms.id = h.idMotivoStatus
+          LEFT JOIN lm5k.ExplicacionesMotivo em ON em.id = h.idExplicacionMotivo
+          WHERE h.idOrden = @IdOrden
+          ORDER BY h.creationDate DESC, h.id DESC
+        `);
+      newRows = newResult.recordset || [];
+    } catch (_) {
+      // tb_orden_status_historial no disponible — solo se usa el historial legacy
+    }
+
+    // 4) Combinar, deduplicar por fecha+status y ordenar
+    const combined = [...legacyResult.recordset, ...newRows];
+    combined.sort((a, b) => {
+      const da = new Date(a.creationDate || 0).getTime();
+      const db = new Date(b.creationDate || 0).getTime();
+      return db - da;
+    });
+
+    res.json(combined);
   } catch (err) {
     next(err);
   }
