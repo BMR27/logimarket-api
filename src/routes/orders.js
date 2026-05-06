@@ -139,6 +139,54 @@ router.get('/:id', async (req, res, next) => {
       .input('Id', sql.Int, id)
       .query('EXEC lm5k.spm_get_order @equipos, @Id');
 
+    const enrichFechaReagendaFromOrdenVenta = async (baseRow) => {
+      const current = (baseRow?.fechaReagendaProgramada || '').toString().trim();
+      if (current) return baseRow;
+
+      try {
+        const fechaRes = await pool.request()
+          .input('Id', sql.Int, id)
+          .query(`
+            SELECT TOP 1 CONVERT(VARCHAR(10), ov.fechaReagendaProgramada, 23) AS fechaReagendaProgramada
+            FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+            WHERE ov.id = @Id AND ISNULL(ov.deleted, 0) = 0
+          `);
+
+        if (fechaRes.recordset.length) {
+          return {
+            ...baseRow,
+            fechaReagendaProgramada: fechaRes.recordset[0].fechaReagendaProgramada || '',
+          };
+        }
+      } catch (_) {
+        // Algunos ambientes legacy usan fechaReagenda en lugar de fechaReagendaProgramada.
+      }
+
+      try {
+        const fechaLegacyRes = await pool.request()
+          .input('Id', sql.Int, id)
+          .query(`
+            SELECT TOP 1 CONVERT(VARCHAR(10), ov.fechaReagenda, 23) AS fechaReagendaProgramada
+            FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+            WHERE ov.id = @Id AND ISNULL(ov.deleted, 0) = 0
+          `);
+
+        if (fechaLegacyRes.recordset.length) {
+          return {
+            ...baseRow,
+            fechaReagendaProgramada: fechaLegacyRes.recordset[0].fechaReagendaProgramada || '',
+          };
+        }
+      } catch (_) {
+        // Si no existe ninguna columna de reagenda, no romper el flujo.
+      }
+
+      return {
+        ...baseRow,
+        fechaReagendaProgramada: '',
+      };
+    };
+
     const enrichMotivoFromOrdenVenta = async (baseRow) => {
       try {
         let motivoRes;
@@ -150,7 +198,8 @@ router.get('/:id', async (req, res, next) => {
                 ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
                 ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
                 ISNULL(ms.motivo, '') AS motivoStatus,
-                ISNULL(em.explicacion, '') AS explicacionMotivo
+                ISNULL(em.explicacion, '') AS explicacionMotivo,
+                ISNULL(ov.observacionesMensajero, '') AS observacionesMensajero
               FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
               LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK) ON ms.id = ov.idMotivoStatus
               LEFT JOIN lm5k.ExplicacionesMotivo em WITH (NOLOCK) ON em.id = ov.idExplicacionMotivo
@@ -165,7 +214,8 @@ router.get('/:id', async (req, res, next) => {
                 ISNULL(ov.idMotivoStatus, 0) AS idMotivoStatus,
                 ISNULL(ov.idExplicacionMotivo, 0) AS idExplicacionMotivo,
                 ISNULL(ms.motivo, '') AS motivoStatus,
-                ISNULL(em.explicacion, '') AS explicacionMotivo
+                ISNULL(em.explicacion, '') AS explicacionMotivo,
+                ISNULL(ov.observacionesMensajero, '') AS observacionesMensajero
               FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
               LEFT JOIN lm5k.MotivosStatus ms WITH (NOLOCK) ON ms.id = ov.idMotivoStatus
               LEFT JOIN lm5k.ExplicacionesMotivos em WITH (NOLOCK) ON em.id = ov.idExplicacionMotivo
@@ -181,6 +231,7 @@ router.get('/:id', async (req, res, next) => {
           idExplicacionMotivo: Number(m.idExplicacionMotivo || 0),
           motivoStatus: m.motivoStatus || '',
           explicacionMotivo: m.explicacionMotivo || '',
+          observacionesMensajero: m.observacionesMensajero || '',
         };
       } catch (err) {
         console.error('[orders/:id] enrichMotivoFromOrdenVenta fallo:', err?.message || err);
@@ -189,7 +240,8 @@ router.get('/:id', async (req, res, next) => {
     };
 
     if (result.recordset.length) {
-      const enriched = await enrichMotivoFromOrdenVenta(result.recordset[0]);
+      const withMotivo = await enrichMotivoFromOrdenVenta(result.recordset[0]);
+      const enriched = await enrichFechaReagendaFromOrdenVenta(withMotivo);
       return res.json(enriched);
     }
 
@@ -242,7 +294,8 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
 
-    const enrichedFallback = await enrichMotivoFromOrdenVenta(fallback.recordset[0]);
+    const withMotivoFallback = await enrichMotivoFromOrdenVenta(fallback.recordset[0]);
+    const enrichedFallback = await enrichFechaReagendaFromOrdenVenta(withMotivoFallback);
     res.json(enrichedFallback);
   } catch (err) {
     next(err);
@@ -290,6 +343,13 @@ router.put('/:id', async (req, res, next) => {
     const safeStatus = Number(status);
     const safeMotivoStatus = Number(motivoStatus) > 0 ? Number(motivoStatus) : null;
     const safeExplicacionMotivo = Number(explicacionMotivo) > 0 ? Number(explicacionMotivo) : null;
+
+    if ((safeStatus === 5 || safeStatus === 6) && !safeMotivoStatus) {
+      return res.status(400).json({ error: 'Para Intento 1/2 el motivo es obligatorio' });
+    }
+    if ((safeStatus === 5 || safeStatus === 6) && !safeExplicacionMotivo) {
+      return res.status(400).json({ error: 'Para Intento 1/2 la explicación es obligatoria' });
+    }
 
     // Regla: no se puede calificar como Intento 2 sin pasar por Intento 1.
     // Verificar en historial legacy (OrdenesVenta_StatusHistorial) para no depender de tb_orden_status_historial
@@ -346,6 +406,35 @@ router.put('/:id', async (req, res, next) => {
           WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
         `);
 
+      // Intentar persistir fecha de reagenda en columnas posibles del esquema.
+      if (fechaReagenda) {
+        try {
+          await pool.request()
+            .input('IdOrden', sql.Int, idOrden)
+            .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+            .query(`
+              UPDATE lm5k.OrdenesVenta
+              SET fechaReagendaProgramada = TRY_CONVERT(date, @FechaReagenda),
+                  lastModifiedDate = GETDATE()
+              WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
+            `);
+        } catch (_) {
+          try {
+            await pool.request()
+              .input('IdOrden', sql.Int, idOrden)
+              .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+              .query(`
+                UPDATE lm5k.OrdenesVenta
+                SET fechaReagenda = TRY_CONVERT(datetime, @FechaReagenda),
+                    lastModifiedDate = GETDATE()
+                WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
+              `);
+          } catch (_) {
+            // Columna no disponible en este ambiente.
+          }
+        }
+      }
+
       // Intentar columnas opcionales sin romper el flujo si no existen en el ambiente.
       try {
         await pool.request()
@@ -373,6 +462,35 @@ router.put('/:id', async (req, res, next) => {
     const updateRow = updateResult?.recordset?.[0];
     if (updateRow && updateRow.result === 'non-affected') {
       return res.status(404).json({ error: 'Orden no encontrada o sin cambios' });
+    }
+
+    // Persistir reagenda de forma explícita en OrdenesVenta incluso si el SP no la toca.
+    if (fechaReagenda) {
+      try {
+        await pool.request()
+          .input('IdOrden', sql.Int, idOrden)
+          .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+          .query(`
+            UPDATE lm5k.OrdenesVenta
+            SET fechaReagendaProgramada = TRY_CONVERT(date, @FechaReagenda),
+                lastModifiedDate = GETDATE()
+            WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
+          `);
+      } catch (_) {
+        try {
+          await pool.request()
+            .input('IdOrden', sql.Int, idOrden)
+            .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
+            .query(`
+              UPDATE lm5k.OrdenesVenta
+              SET fechaReagenda = TRY_CONVERT(datetime, @FechaReagenda),
+                  lastModifiedDate = GETDATE()
+              WHERE id = @IdOrden AND ISNULL(deleted, 0) = 0
+            `);
+        } catch (_) {
+          // Columna no disponible en este ambiente.
+        }
+      }
     }
 
     // Insertar datos de envío (distancia y tiempo)
