@@ -59,6 +59,18 @@ function pickColumn(columnsMap, candidates) {
   return null;
 }
 
+function getBackpackState(backpackRow) {
+  const rawState = backpackRow?.State
+    ?? backpackRow?.state
+    ?? backpackRow?.Estado
+    ?? backpackRow?.estado
+    ?? backpackRow?.IdEstado
+    ?? backpackRow?.idEstado;
+
+  const parsed = Number(rawState);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 async function getSchemaInfo(pool) {
   const now = Date.now();
   if (schemaCache && now - schemaCacheAt < SCHEMA_CACHE_TTL_MS) {
@@ -200,7 +212,7 @@ router.get('/:idUsuario', async (req, res, next) => {
     const filtered = includeClosed
       ? backpacks
       : backpacks.filter((b) => {
-          const state = Number(b.State ?? b.state ?? 0);
+          const state = getBackpackState(b);
           // Mostrar mochilas en estado 1 (Asignada) o 2 (En Ruta)
           return state === 1 || state === 2;
         });
@@ -440,7 +452,7 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
     const activeBackpackIds = new Set(
       (activeBpRes.recordset || [])
         .filter((b) => {
-          const state = Number(b.State ?? b.state ?? 0);
+          const state = getBackpackState(b);
           return state === 1 || state === 2;
         })
         .map((b) => Number(b.Id ?? b.id ?? 0))
