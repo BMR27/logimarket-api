@@ -64,11 +64,82 @@ function getBackpackState(backpackRow) {
     ?? backpackRow?.state
     ?? backpackRow?.Estado
     ?? backpackRow?.estado
+    ?? backpackRow?.Status
+    ?? backpackRow?.status
     ?? backpackRow?.IdEstado
     ?? backpackRow?.idEstado;
 
   const parsed = Number(rawState);
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (Number.isFinite(parsed)) return parsed;
+
+  const rawText = String(
+    backpackRow?.StateName
+      ?? backpackRow?.stateName
+      ?? backpackRow?.EstadoNombre
+      ?? backpackRow?.estadoNombre
+      ?? backpackRow?.Estatus
+      ?? backpackRow?.estatus
+      ?? ''
+  )
+    .trim()
+    .toLowerCase();
+
+  if (!rawText) return 0;
+  if (rawText.includes('asign')) return 1;
+  if (rawText.includes('ruta')) return 2;
+  if (rawText.includes('termin') || rawText.includes('finaliz')) return 3;
+  if (rawText.includes('cerr') || rawText.includes('cancel')) return 4;
+
+  return 0;
+}
+
+function isActiveBackpack(backpackRow) {
+  const state = getBackpackState(backpackRow);
+  return state === 1 || state === 2;
+}
+
+async function getBackpacksFallback(pool, idUsuario) {
+  const result = await pool.request()
+    .input('IdUsuario', sql.Int, idUsuario)
+    .query(`
+      SELECT
+        b.Id,
+        b.IdRepartidor,
+        ISNULL(mu.nombres + ' ' + mu.apellidoPaterno, '') AS NombreRepartidor,
+        b.CreationDate,
+        b.State,
+        CASE b.State
+          WHEN 1 THEN 'Asignada'
+          WHEN 2 THEN 'En Ruta'
+          WHEN 3 THEN 'Terminada'
+          WHEN 4 THEN 'Cerrada'
+          ELSE 'Desconocido'
+        END AS StateName,
+        COUNT(cb.IdOrdenVenta) AS TotalOrders,
+        SUM(CASE WHEN ISNULL(cb.Validation, 0) = 1 THEN 1 ELSE 0 END) AS ProgressOrders
+      FROM lm5k.tb_backpacks b WITH (NOLOCK)
+      LEFT JOIN lm5k.tb_contenido_backpacks cb WITH (NOLOCK)
+        ON cb.IdBackPack = b.Id AND ISNULL(cb.Deleted, 0) = 0
+      LEFT JOIN lm5k.Usuarios mu WITH (NOLOCK)
+        ON mu.id = b.IdRepartidor
+      WHERE ISNULL(b.Deleted, 0) = 0
+        AND b.IdRepartidor = @IdUsuario
+      GROUP BY b.Id, b.IdRepartidor, mu.nombres, mu.apellidoPaterno, b.CreationDate, b.State
+      ORDER BY b.Id DESC
+    `);
+
+  return result.recordset || [];
+}
+
+async function getUserBackpacks(pool, idUsuario) {
+  const spResult = await pool.request()
+    .input('IdUsuario', sql.Int, idUsuario)
+    .query('EXEC lm5k.spm_getBackpacks @IdUsuario');
+
+  const spRows = spResult.recordset || [];
+  if (spRows.length > 0) return spRows;
+
+  return getBackpacksFallback(pool, idUsuario);
 }
 
 async function getSchemaInfo(pool) {
@@ -202,19 +273,14 @@ router.get('/:idUsuario', async (req, res, next) => {
     const includeClosed = String(req.query.includeClosed || '0') === '1';
 
     const pool = await getPool();
-    const result = await pool.request()
-      .input('IdUsuario', sql.Int, idUsuario)
-      .query('EXEC lm5k.spm_getBackpacks @IdUsuario');
-
-    const backpacks = result.recordset || [];
+    const backpacks = await getUserBackpacks(pool, idUsuario);
     
     // Filtrar mochilas por estado
     const filtered = includeClosed
       ? backpacks
       : backpacks.filter((b) => {
-          const state = getBackpackState(b);
           // Mostrar mochilas en estado 1 (Asignada) o 2 (En Ruta)
-          return state === 1 || state === 2;
+          return isActiveBackpack(b);
         });
 
     res.json(filtered);
@@ -445,16 +511,11 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
     if (isNaN(idRepartidor)) return res.status(400).json({ error: 'IdRepartidor inválido' });
 
     const pool = await getPool();
-    const activeBpRes = await pool.request()
-      .input('IdUsuario', sql.Int, idRepartidor)
-      .query('EXEC lm5k.spm_getBackpacks @IdUsuario');
+    const activeBackpacks = await getUserBackpacks(pool, idRepartidor);
 
     const activeBackpackIds = new Set(
-      (activeBpRes.recordset || [])
-        .filter((b) => {
-          const state = getBackpackState(b);
-          return state === 1 || state === 2;
-        })
+      (activeBackpacks || [])
+        .filter((b) => isActiveBackpack(b))
         .map((b) => Number(b.Id ?? b.id ?? 0))
         .filter((id) => Number.isInteger(id) && id > 0)
     );
