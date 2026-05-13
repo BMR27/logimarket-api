@@ -3,6 +3,10 @@ const { getPool, sql } = require('../config/database');
 
 const router = express.Router();
 
+let schemaCache = null;
+let schemaCacheAt = 0;
+const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+
 async function getBlockingBackpacks(pool, idRepartidor, excludeBackpackId = null) {
   const request = pool.request().input('IdRepartidor', sql.Int, Number(idRepartidor));
   if (excludeBackpackId) {
@@ -28,6 +32,124 @@ async function getBlockingBackpacks(pool, idRepartidor, excludeBackpackId = null
   `);
 
   return result.recordset || [];
+}
+
+async function getTableColumnsMap(pool, tableName) {
+  const result = await pool.request()
+    .input('TableName', sql.NVarChar(128), tableName)
+    .query(`
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'lm5k' AND TABLE_NAME = @TableName
+    `);
+
+  const columns = new Map();
+  for (const row of result.recordset || []) {
+    const name = String(row.COLUMN_NAME || '').trim();
+    if (name) columns.set(name.toLowerCase(), name);
+  }
+  return columns;
+}
+
+function pickColumn(columnsMap, candidates) {
+  for (const candidate of candidates) {
+    const found = columnsMap.get(String(candidate).toLowerCase());
+    if (found) return found;
+  }
+  return null;
+}
+
+async function getSchemaInfo(pool) {
+  const now = Date.now();
+  if (schemaCache && now - schemaCacheAt < SCHEMA_CACHE_TTL_MS) {
+    return schemaCache;
+  }
+
+  const [backpackCols, orderCols] = await Promise.all([
+    getTableColumnsMap(pool, 'tb_contenido_backpacks'),
+    getTableColumnsMap(pool, 'OrdenesVenta'),
+  ]);
+
+  schemaCache = {
+    backpackItemIdColumn: pickColumn(backpackCols, ['IdBackpackItem', 'IdBackPackItem', 'IdContenidoMochila']),
+    orderLatitudeColumn: pickColumn(orderCols, ['Latitud', 'Latitude']),
+    orderLongitudeColumn: pickColumn(orderCols, ['Longitud', 'Longitude', 'Lng']),
+    orderStreetColumn: pickColumn(orderCols, ['Calle', 'Direccion']),
+    orderNumExteriorColumn: pickColumn(orderCols, ['NumExterior', 'NumeroExterior']),
+    orderColoniaColumn: pickColumn(orderCols, ['Colonia']),
+    orderMunicipioColumn: pickColumn(orderCols, ['MunicipioDelegacion', 'Municipio']),
+    orderEstadoColumn: pickColumn(orderCols, ['Estado']),
+    orderCodigoPostalColumn: pickColumn(orderCols, ['CodigoPostal', 'CP']),
+  };
+  schemaCacheAt = now;
+  return schemaCache;
+}
+
+async function enrichItemsWithOrderData(pool, items) {
+  const ids = [...new Set(items
+    .map((i) => Number(i.IdOrdenVenta || i.idOrdenVenta || 0))
+    .filter((id) => Number.isInteger(id) && id > 0))]
+    .join(',');
+
+  if (!ids) return;
+
+  const schemaInfo = await getSchemaInfo(pool);
+  const selectCols = ['id'];
+
+  if (schemaInfo.orderLatitudeColumn) {
+    selectCols.push(`[${schemaInfo.orderLatitudeColumn}] AS Latitud`);
+  }
+  if (schemaInfo.orderLongitudeColumn) {
+    selectCols.push(`[${schemaInfo.orderLongitudeColumn}] AS Longitud`);
+  }
+  if (schemaInfo.orderStreetColumn) {
+    selectCols.push(`[${schemaInfo.orderStreetColumn}] AS Calle`);
+  }
+  if (schemaInfo.orderNumExteriorColumn) {
+    selectCols.push(`[${schemaInfo.orderNumExteriorColumn}] AS NumExterior`);
+  }
+  if (schemaInfo.orderColoniaColumn) {
+    selectCols.push(`[${schemaInfo.orderColoniaColumn}] AS Colonia`);
+  }
+  if (schemaInfo.orderMunicipioColumn) {
+    selectCols.push(`[${schemaInfo.orderMunicipioColumn}] AS MunicipioDelegacion`);
+  }
+  if (schemaInfo.orderEstadoColumn) {
+    selectCols.push(`[${schemaInfo.orderEstadoColumn}] AS Estado`);
+  }
+  if (schemaInfo.orderCodigoPostalColumn) {
+    selectCols.push(`[${schemaInfo.orderCodigoPostalColumn}] AS CodigoPostal`);
+  }
+
+  const coordsResult = await pool.request()
+    .query(`SELECT ${selectCols.join(', ')} FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
+
+  const coordMap = {};
+  for (const row of coordsResult.recordset || []) {
+    coordMap[row.id] = {
+      latitud: row.Latitud ?? null,
+      longitud: row.Longitud ?? null,
+      calle: row.Calle ?? null,
+      numExterior: row.NumExterior ?? null,
+      colonia: row.Colonia ?? null,
+      municipio: row.MunicipioDelegacion ?? null,
+      estado: row.Estado ?? null,
+      codigoPostal: row.CodigoPostal ?? null,
+    };
+  }
+
+  for (const item of items) {
+    const id = Number(item.IdOrdenVenta || item.idOrdenVenta || 0);
+    const d = coordMap[id];
+    item.Latitud = d?.latitud ?? null;
+    item.Longitud = d?.longitud ?? null;
+    item.Calle = d?.calle ?? null;
+    item.NumExterior = d?.numExterior ?? null;
+    item.Colonia = d?.colonia ?? null;
+    item.MunicipioDelegacion = d?.municipio ?? null;
+    item.Estado = d?.estado ?? null;
+    item.CodigoPostal = d?.codigoPostal ?? null;
+  }
 }
 
 // ── Utilidad: envío de mensaje WhatsApp/SMS por número ──────────────────────
@@ -73,13 +195,14 @@ router.get('/:idUsuario', async (req, res, next) => {
       .query('EXEC lm5k.spm_getBackpacks @IdUsuario');
 
     const backpacks = result.recordset || [];
-    const blocking = await getBlockingBackpacks(pool, idUsuario);
-    const blockingIds = new Set(blocking.map((b) => Number(b.Id || 0)).filter((id) => id > 0));
+    
+    // Filtrar mochilas por estado
     const filtered = includeClosed
       ? backpacks
       : backpacks.filter((b) => {
-          const id = Number(b.Id ?? b.id ?? 0);
-          return blockingIds.has(id);
+          const state = Number(b.State ?? b.state ?? 0);
+          // Mostrar mochilas en estado 1 (Asignada) o 2 (En Ruta)
+          return state === 1 || state === 2;
         });
 
     res.json(filtered);
@@ -263,22 +386,19 @@ router.get('/:id/items', async (req, res, next) => {
         const validationResult = await pool.request()
           .input('IdBackpack', sql.Int, idBackpack)
           .query(`
-            SELECT IdBackpackItem, IdOrdenVenta, ISNULL(Validation, 0) AS Validation
+            SELECT IdOrdenVenta, ISNULL(Validation, 0) AS Validation
             FROM lm5k.tb_contenido_backpacks
             WHERE IdBackPack = @IdBackpack AND Deleted = 0
           `);
 
-        const byBackpackItem = new Map();
         const byOrder = new Map();
         for (const row of validationResult.recordset || []) {
-          if (row.IdBackpackItem) byBackpackItem.set(Number(row.IdBackpackItem), Number(row.Validation || 0));
           if (row.IdOrdenVenta) byOrder.set(Number(row.IdOrdenVenta), Number(row.Validation || 0));
         }
 
         for (const item of items) {
-          const itemBackpackItem = Number(item.IdBackPackItem || item.IdBackpackItem || item.idBackpackItem || 0);
           const itemOrder = Number(item.IdOrdenVenta || item.idOrdenVenta || 0);
-          const realValidation = byBackpackItem.get(itemBackpackItem) ?? byOrder.get(itemOrder);
+          const realValidation = byOrder.get(itemOrder);
           if (realValidation !== undefined) {
             item.Validation = realValidation;
           }
@@ -290,36 +410,7 @@ router.get('/:id/items', async (req, res, next) => {
 
     if (items.length > 0) {
       try {
-        const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
-        if (ids) {
-          const coordsResult = await pool.request()
-            .query(`SELECT id, Latitud, Longitud, Calle, NumExterior, Colonia, MunicipioDelegacion, Estado, CodigoPostal FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
-          const coordMap = {};
-          for (const row of coordsResult.recordset) {
-            coordMap[row.id] = {
-              latitud: row.Latitud,
-              longitud: row.Longitud,
-              calle: row.Calle,
-              numExterior: row.NumExterior,
-              colonia: row.Colonia,
-              municipio: row.MunicipioDelegacion,
-              estado: row.Estado,
-              codigoPostal: row.CodigoPostal,
-            };
-          }
-          for (const item of items) {
-            const id = item.IdOrdenVenta || item.idOrdenVenta;
-            const d = coordMap[id];
-            item.Latitud = d?.latitud ?? null;
-            item.Longitud = d?.longitud ?? null;
-            item.Calle = d?.calle ?? null;
-            item.NumExterior = d?.numExterior ?? null;
-            item.Colonia = d?.colonia ?? null;
-            item.MunicipioDelegacion = d?.municipio ?? null;
-            item.Estado = d?.estado ?? null;
-            item.CodigoPostal = d?.codigoPostal ?? null;
-          }
-        }
+        await enrichItemsWithOrderData(pool, items);
       } catch (coordErr) {
         console.warn('[backpacks] No se pudo enriquecer lat/lng:', coordErr.message);
         // No falla el endpoint principal — items se devuelven sin coordenadas
@@ -406,36 +497,7 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
 
     if (items.length > 0) {
       try {
-        const ids = items.map(i => i.IdOrdenVenta || i.idOrdenVenta).filter(id => id && id !== 0).join(',');
-        if (ids) {
-          const coordsResult = await pool.request()
-            .query(`SELECT id, Latitud, Longitud, Calle, NumExterior, Colonia, MunicipioDelegacion, Estado, CodigoPostal FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
-          const coordMap = {};
-          for (const row of coordsResult.recordset) {
-            coordMap[row.id] = {
-              latitud: row.Latitud,
-              longitud: row.Longitud,
-              calle: row.Calle,
-              numExterior: row.NumExterior,
-              colonia: row.Colonia,
-              municipio: row.MunicipioDelegacion,
-              estado: row.Estado,
-              codigoPostal: row.CodigoPostal,
-            };
-          }
-          for (const item of items) {
-            const id = item.IdOrdenVenta || item.idOrdenVenta;
-            const d = coordMap[id];
-            item.Latitud = d?.latitud ?? null;
-            item.Longitud = d?.longitud ?? null;
-            item.Calle = d?.calle ?? null;
-            item.NumExterior = d?.numExterior ?? null;
-            item.Colonia = d?.colonia ?? null;
-            item.MunicipioDelegacion = d?.municipio ?? null;
-            item.Estado = d?.estado ?? null;
-            item.CodigoPostal = d?.codigoPostal ?? null;
-          }
-        }
+        await enrichItemsWithOrderData(pool, items);
       } catch (coordErr) {
         console.warn('[backpacks] No se pudo enriquecer lat/lng:', coordErr.message);
         // No falla el endpoint principal — items se devuelven sin coordenadas
@@ -539,18 +601,23 @@ router.put('/items/:id/validate', async (req, res, next) => {
     // INTENTO 1: Si es numérico, busca por IdBackpackItem
     if (isNumericId) {
       try {
-        console.log('[VALIDATE] INTENTO 1: UPDATE por IdBackpackItem =', idItem);
-        
-        const updateResult = await pool.request()
-          .input('IdBackpackItem', sql.Int, idItem)
-          .input('Validation', sql.Int, 1)
-          .query(`UPDATE lm5k.tb_contenido_backpacks SET Validation = @Validation WHERE IdBackpackItem = @IdBackpackItem`);
+        const schemaInfo = await getSchemaInfo(pool);
+        if (!schemaInfo.backpackItemIdColumn) {
+          console.log('[VALIDATE] INTENTO 1 OMITIDO: no existe columna IdBackpackItem/IdBackPackItem');
+        } else {
+          console.log('[VALIDATE] INTENTO 1: UPDATE por', schemaInfo.backpackItemIdColumn, '=', idItem);
 
-        if (updateResult.rowsAffected[0] > 0) {
-          console.log('[VALIDATE] ✓ INTENTO 1 EXITOSO');
-          return res.json({ success: true, method: 'IdBackpackItem' });
+          const updateResult = await pool.request()
+            .input('IdBackpackItem', sql.Int, idItem)
+            .input('Validation', sql.Int, 1)
+            .query(`UPDATE lm5k.tb_contenido_backpacks SET Validation = @Validation WHERE [${schemaInfo.backpackItemIdColumn}] = @IdBackpackItem`);
+
+          if (updateResult.rowsAffected[0] > 0) {
+            console.log('[VALIDATE] ✓ INTENTO 1 EXITOSO');
+            return res.json({ success: true, method: schemaInfo.backpackItemIdColumn });
+          }
+          console.log('[VALIDATE] ✗ INTENTO 1: 0 filas afectadas');
         }
-        console.log('[VALIDATE] ✗ INTENTO 1: 0 filas afectadas');
       } catch (err1) {
         console.log('[VALIDATE] ✗ INTENTO 1 ERROR:', err1.message);
       }
