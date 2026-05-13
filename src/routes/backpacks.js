@@ -276,12 +276,12 @@ router.get('/:idUsuario', async (req, res, next) => {
     const backpacks = await getUserBackpacks(pool, idUsuario);
     
     // Filtrar mochilas por estado
+    const activeBackpacks = backpacks.filter((b) => isActiveBackpack(b));
+    const nonClosedBackpacks = backpacks.filter((b) => getBackpackState(b) !== 4);
+
     const filtered = includeClosed
       ? backpacks
-      : backpacks.filter((b) => {
-          // Mostrar mochilas en estado 1 (Asignada) o 2 (En Ruta)
-          return isActiveBackpack(b);
-        });
+      : (activeBackpacks.length > 0 ? activeBackpacks : nonClosedBackpacks);
 
     res.json(filtered);
   } catch (err) {
@@ -513,9 +513,13 @@ router.get('/deliver/:idRepartidor/items', async (req, res, next) => {
     const pool = await getPool();
     const activeBackpacks = await getUserBackpacks(pool, idRepartidor);
 
+    const parsedBackpacks = activeBackpacks || [];
+    const activeRows = parsedBackpacks.filter((b) => isActiveBackpack(b));
+    const nonClosedRows = parsedBackpacks.filter((b) => getBackpackState(b) !== 4);
+    const sourceRows = activeRows.length > 0 ? activeRows : nonClosedRows;
+
     const activeBackpackIds = new Set(
-      (activeBackpacks || [])
-        .filter((b) => isActiveBackpack(b))
+      sourceRows
         .map((b) => Number(b.Id ?? b.id ?? 0))
         .filter((id) => Number.isInteger(id) && id > 0)
     );
