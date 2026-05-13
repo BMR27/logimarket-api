@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const authRoutes = require('./routes/auth');
 const equiposRoutes = require('./routes/equipos');
 const ordersRoutes = require('./routes/orders');
+const paymentsRoutes = require('./routes/payments');
 const productsRoutes = require('./routes/products');
 const searchRoutes = require('./routes/search');
 const backpacksRoutes = require('./routes/backpacks');
@@ -14,6 +15,9 @@ const catalogsRoutes = require('./routes/catalogs');
 const validacionRoutes = require('./routes/validacion');
 const adminRoutes = require('./routes/admin');
 const ubicacionRoutes = require('./routes/ubicacion');
+const publicPaymentsRoutes = require('./routes/publicPayments');
+const mockPaymentsRoutes = require('./routes/mockPayments');
+const payCheckoutRoutes = require('./routes/payCheckout');
 const { errorHandler } = require('./middleware/errorHandler');
 const { authenticate } = require('./middleware/auth');
 
@@ -46,8 +50,12 @@ app.get('/health', (req, res) => {
 
 // Rutas públicas
 app.use('/api/auth', authRoutes);
+app.use('/api/public/payments', publicPaymentsRoutes);
+app.use('/api/mock/payments', mockPaymentsRoutes);
+app.use('/pay', payCheckoutRoutes);
 
 // Rutas protegidas (requieren JWT)
+app.use('/api/orders', authenticate, paymentsRoutes);
 app.use('/api/equipos', authenticate, equiposRoutes);
 app.use('/api/orders', authenticate, ordersRoutes);
 app.use('/api/products', authenticate, productsRoutes);
