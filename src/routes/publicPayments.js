@@ -3,18 +3,17 @@ const express = require('express');
 const { getPool } = require('../config/database');
 const {
   PAYMENT_STATUS,
-  confirmPaymentByProviderPaymentId,
   buildManualTransferDetails,
-  buildManualTransferReference,
+  confirmPaymentByProviderPaymentId,
   ensurePaymentsSchema,
   formatPaymentResponse,
   getOrderById,
   getPaymentByToken,
-  isBankTransferProvider,
   isExpired,
   markPaymentExpired,
   markPaymentFailed,
   markPaymentPaid,
+  markPaymentUnderReview,
   paymentProvider,
   savePaymentEvent,
   scheduleMockConfirmation,
@@ -57,17 +56,24 @@ router.get('/:paymentToken', async (req, res, next) => {
     }
 
     const order = await getOrderById(pool, payment.orderId);
+    const status = String(payment.status);
+    const bankTransfer = buildManualTransferDetails(payment, order, payment.providerPaymentId || null);
+
     return res.json({
       success: true,
+      paymentToken: payment.paymentToken,
       trackingNumber: order?.trackingNumber || '',
+      customerName: order?.customerName || '',
+      customerCode: String(order?.customerCode || ''),
       amount: Number(payment.amount),
       currency: payment.currency || 'MXN',
-      customerName: formatPaymentResponse(payment, order, { maskCustomer: true }).customerName,
-      status: String(payment.status),
+      bankName: bankTransfer.bankName,
+      beneficiaryName: bankTransfer.beneficiaryName,
+      clabe: bankTransfer.clabe,
+      reference: bankTransfer.reference,
+      concept: bankTransfer.concept,
+      status,
       expiresAt: payment.expiresAt,
-      checkoutUrl: payment.checkoutUrl,
-      qrCodeUrl: payment.qrCodeUrl,
-      methods: ['CARD', 'SPEI', 'CASH_MOCK'],
     });
   } catch (err) {
     return next(err);
@@ -177,6 +183,57 @@ router.post('/:paymentToken/pay', async (req, res, next) => {
       message: provider === 'KLU_MOCK'
         ? 'Pago en simulacion, espera confirmacion.'
         : 'Pago iniciado.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── Reporte de pago por el cliente ────────────────────────────────────────
+router.post('/:paymentToken/report-payment', async (req, res, next) => {
+  try {
+    const paymentToken = String(req.params.paymentToken || '').trim();
+    if (!paymentToken) {
+      return res.status(400).json({ error: 'paymentToken requerido' });
+    }
+
+    const pool = await getPool();
+    const payment = await resolvePayment(pool, paymentToken);
+    if (!payment) {
+      return res.status(404).json({ error: 'Pago no encontrado' });
+    }
+
+    const currentStatus = String(payment.status);
+
+    if (currentStatus === PAYMENT_STATUS.PAID) {
+      return res.status(409).json({ error: 'El pago ya fue confirmado' });
+    }
+    if (currentStatus === PAYMENT_STATUS.EXPIRED) {
+      return res.status(409).json({ error: 'El pago ha expirado' });
+    }
+    if (currentStatus === PAYMENT_STATUS.CANCELLED) {
+      return res.status(409).json({ error: 'El pago fue cancelado' });
+    }
+    if (
+      currentStatus === PAYMENT_STATUS.UNDER_REVIEW ||
+      currentStatus === PAYMENT_STATUS.CUSTOMER_REPORTED_PAYMENT
+    ) {
+      return res.json({
+        success: true,
+        status: currentStatus,
+        message: 'Pago ya reportado. Finanzas validará la transferencia.',
+      });
+    }
+
+    const updated = await markPaymentUnderReview(pool, payment.id);
+    await savePaymentEvent(pool, payment.id, 'CUSTOMER_REPORTED_PAYMENT', PAYMENT_STATUS.UNDER_REVIEW, {
+      source: 'customer_checkout',
+    });
+
+    return res.json({
+      success: true,
+      status: updated?.status || PAYMENT_STATUS.UNDER_REVIEW,
+      message: 'Pago reportado correctamente. Finanzas validará la transferencia.',
     });
   } catch (err) {
     return next(err);

@@ -9,6 +9,8 @@ const PAYMENT_STATUS = {
   EXPIRED: 'EXPIRED',
   FAILED: 'FAILED',
   CANCELLED: 'CANCELLED',
+  CUSTOMER_REPORTED_PAYMENT: 'CUSTOMER_REPORTED_PAYMENT',
+  UNDER_REVIEW: 'UNDER_REVIEW',
 };
 
 function paymentProvider() {
@@ -24,6 +26,14 @@ function getPaymentDestinationAccount() {
   return String(process.env.PAYMENT_DESTINATION_ACCOUNT || '').trim();
 }
 
+function getPaymentBankName() {
+  return String(process.env.PAYMENT_BANK_NAME || '').trim();
+}
+
+function getPaymentBeneficiaryName() {
+  return String(process.env.PAYMENT_BENEFICIARY_NAME || '').trim();
+}
+
 function buildManualTransferReference(payment) {
   const token = String(payment?.paymentToken || payment?.id || crypto.randomUUID())
     .replace(/[^a-zA-Z0-9]/g, '')
@@ -35,20 +45,27 @@ function buildManualTransferDetails(payment, order, reference) {
   const destinationAccount = getPaymentDestinationAccount();
   const amount = Number(payment?.amount || 0);
   const currency = payment?.currency || 'MXN';
-  const trackingNumber = order?.trackingNumber || payment?.orderId || payment?.paymentToken || '';
-  const concept = `Pago orden ${trackingNumber}`;
-  const transferReference = reference || buildManualTransferReference(payment);
+  const trackingNumber = order?.trackingNumber || String(payment?.orderId || '');
+  const customerCode = String(order?.customerCode || '').trim();
+  const concept = `GUIA-${trackingNumber}`;
+  const transferReference = reference || (
+    customerCode ? `${trackingNumber}-${customerCode}` : trackingNumber
+  ) || buildManualTransferReference(payment);
 
   return {
+    bankName: getPaymentBankName(),
+    beneficiaryName: getPaymentBeneficiaryName(),
+    clabe: destinationAccount,
     destinationAccount,
     reference: transferReference,
     amount,
     currency,
     concept,
     instructions: [
-      `Transfiere ${amount.toFixed(2)} ${currency} a la cuenta ${destinationAccount}.`,
-      `Usa la referencia ${transferReference}.`,
-      'Cuando el banco confirme el movimiento, el pago podrá marcarse como recibido.',
+      `Transfiere ${amount.toFixed(2)} ${currency} a la CLABE ${destinationAccount}.`,
+      `Referencia: ${transferReference}.`,
+      `Concepto: ${concept}.`,
+      'Cuando el banco confirme el movimiento, Finanzas validará tu pago.',
     ],
   };
 }
@@ -196,7 +213,8 @@ async function getOrderById(pool, orderId) {
         ISNULL(ov.folioOrdenCliente, '') AS trackingNumber,
         ISNULL(ov.cliente, '') AS customerName,
         CAST(ISNULL(ov.total, 0) AS DECIMAL(18,2)) AS amount,
-        ISNULL(ov.idStatus, 0) AS orderStatus
+        ISNULL(ov.idStatus, 0) AS orderStatus,
+        ISNULL(CAST(ov.idCliente AS NVARCHAR(20)), '') AS customerCode
       FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
       WHERE ov.id = @OrderId
     `);
@@ -304,6 +322,24 @@ async function markPaymentExpired(pool, paymentId) {
       WHERE id = @PaymentId
         AND status = '${PAYMENT_STATUS.WAITING_PAYMENT}'
     `);
+}
+
+async function markPaymentUnderReview(pool, paymentId) {
+  await pool.request()
+    .input('PaymentId', sql.Int, Number(paymentId))
+    .query(`
+      UPDATE lm5k.payments
+      SET status = '${PAYMENT_STATUS.UNDER_REVIEW}',
+          lastModifiedDate = SYSUTCDATETIME()
+      WHERE id = @PaymentId
+        AND status NOT IN ('${PAYMENT_STATUS.PAID}', '${PAYMENT_STATUS.EXPIRED}', '${PAYMENT_STATUS.CANCELLED}')
+    `);
+
+  const refreshed = await pool.request()
+    .input('PaymentId', sql.Int, Number(paymentId))
+    .query('SELECT TOP 1 * FROM lm5k.payments WHERE id = @PaymentId');
+
+  return refreshed.recordset?.[0] || null;
 }
 
 async function createPaymentForOrder(pool, req, orderId) {
@@ -488,10 +524,13 @@ module.exports = {
   getOrderById,
   getPaymentByToken,
   getPaymentDestinationAccount,
+  getPaymentBankName,
+  getPaymentBeneficiaryName,
   isExpired,
   markPaymentExpired,
   markPaymentFailed,
   markPaymentPaid,
+  markPaymentUnderReview,
   maskCustomerName,
   paymentProvider,
   isBankTransferProvider,
