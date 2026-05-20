@@ -8,6 +8,12 @@ router.get('/:paymentToken', (req, res) => {
     return res.status(400).send('paymentToken requerido');
   }
 
+  // Permitir scripts inline para esta página de checkout pública
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:",
+  );
+
   const logoUrl = process.env.PUBLIC_COMPANY_LOGO_URL || '';
   const safeToken = paymentToken.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
