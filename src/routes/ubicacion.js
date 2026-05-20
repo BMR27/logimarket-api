@@ -243,4 +243,25 @@ router.get('/:idMensajero', async (req, res, next) => {
   }
 });
 
+/**
+ * DELETE /api/ubicacion/:idMensajero
+ * Borra la ubicación en tiempo real del mensajero (al cerrar sesión / detener tracking).
+ */
+router.delete('/:idMensajero', async (req, res, next) => {
+  try {
+    const idMensajero = Number(req.params.idMensajero);
+    if (!idMensajero || Number.isNaN(idMensajero)) {
+      return res.status(400).json({ message: 'idMensajero inválido' });
+    }
+    const pool = await getPool();
+    await ensureUbicacionTable(pool);
+    await pool.request()
+      .input('idMensajero', sql.Int, idMensajero)
+      .query(`DELETE FROM lm5k.tb_mensajero_ubicacion WHERE idMensajero = @idMensajero`);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
