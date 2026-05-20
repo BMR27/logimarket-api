@@ -28,6 +28,41 @@ async function ensureUbicacionTable(pool) {
   await ubicacionTableReady;
 }
 
+// ── Lazy migration: tabla de historial de ubicaciones ────────────────────────
+let historyTableReady = null;
+async function ensureHistoryTable(pool) {
+  if (!historyTableReady) {
+    historyTableReady = (async () => {
+      await pool.request().query(`
+        IF NOT EXISTS (
+          SELECT 1 FROM sys.objects
+          WHERE object_id = OBJECT_ID(N'lm5k.tb_mensajero_ubicacion_history') AND type = 'U'
+        )
+        CREATE TABLE lm5k.tb_mensajero_ubicacion_history (
+          id          INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+          idMensajero INT NOT NULL,
+          idOrden     INT NULL,
+          latitud     DECIMAL(10,7) NOT NULL,
+          longitud    DECIMAL(10,7) NOT NULL,
+          accuracy    FLOAT NULL,
+          enViaje     BIT NOT NULL DEFAULT 0,
+          createdAt   DATETIME NOT NULL DEFAULT GETDATE()
+        );
+      `);
+      await pool.request().query(`
+        IF NOT EXISTS (
+          SELECT 1 FROM sys.indexes
+          WHERE object_id = OBJECT_ID(N'lm5k.tb_mensajero_ubicacion_history')
+            AND name = 'IX_hist_mensajero_created'
+        )
+        CREATE INDEX IX_hist_mensajero_created
+          ON lm5k.tb_mensajero_ubicacion_history(idMensajero, createdAt DESC);
+      `);
+    })();
+  }
+  await historyTableReady;
+}
+
 /**
  * POST /api/ubicacion
  * Body: { idMensajero, latitud, longitud, accuracy?, idOrden?, enViaje? }
@@ -65,6 +100,23 @@ router.post('/', async (req, res, next) => {
           INSERT (idMensajero, latitud, longitud, accuracy, idOrden, enViaje)
           VALUES (@idMensajero, @latitud, @longitud, @accuracy, @idOrden, @enViaje);
       `);
+
+    // Insertar en historial (no bloquea la respuesta)
+    ensureHistoryTable(pool).then(() =>
+      pool.request()
+        .input('hIdMensajero', sql.Int, Number(idMensajero))
+        .input('hIdOrden',     sql.Int, idOrden ? Number(idOrden) : null)
+        .input('hLatitud',     sql.Decimal(10, 7), Number(latitud))
+        .input('hLongitud',    sql.Decimal(10, 7), Number(longitud))
+        .input('hAccuracy',    sql.Float, accuracy != null ? Number(accuracy) : null)
+        .input('hEnViaje',     sql.Bit, enViaje ? 1 : 0)
+        .query(`
+          INSERT INTO lm5k.tb_mensajero_ubicacion_history
+            (idMensajero, idOrden, latitud, longitud, accuracy, enViaje)
+          VALUES
+            (@hIdMensajero, @hIdOrden, @hLatitud, @hLongitud, @hAccuracy, @hEnViaje)
+        `)
+    ).catch(() => {});
 
     res.json({ ok: true });
   } catch (err) {
@@ -107,6 +159,42 @@ router.get('/equipo/:idEquipo', async (req, res, next) => {
           ON ov.id = u.idOrden AND ISNULL(ov.deleted, 0) = 0
         WHERE ISNULL(usr.deleted, 0) = 0
         ORDER BY u.updatedAt DESC
+      `);
+
+    res.json(result.recordset);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/ubicacion/:idMensajero/history?limit=50
+ * Retorna las últimas N posiciones históricas del mensajero.
+ * IMPORTANTE: debe estar ANTES de /:idMensajero.
+ */
+router.get('/:idMensajero/history', async (req, res, next) => {
+  try {
+    const idMensajero = Number(req.params.idMensajero);
+    if (!idMensajero || Number.isNaN(idMensajero)) {
+      return res.status(400).json({ message: 'idMensajero inválido' });
+    }
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const pool = await getPool();
+    await ensureHistoryTable(pool);
+
+    const result = await pool.request()
+      .input('idMensajero', sql.Int, idMensajero)
+      .input('limit', sql.Int, limit)
+      .query(`
+        SELECT TOP (@limit)
+          h.id, h.idMensajero, h.latitud, h.longitud, h.accuracy,
+          h.enViaje, h.idOrden, h.createdAt,
+          ov.folioOrdenCliente
+        FROM lm5k.tb_mensajero_ubicacion_history h WITH (NOLOCK)
+        LEFT JOIN lm5k.OrdenesVenta ov WITH (NOLOCK)
+          ON ov.id = h.idOrden AND ISNULL(ov.deleted, 0) = 0
+        WHERE h.idMensajero = @idMensajero
+        ORDER BY h.createdAt DESC
       `);
 
     res.json(result.recordset);
