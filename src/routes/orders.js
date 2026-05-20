@@ -5,6 +5,48 @@ const router = express.Router();
 
 let statusHistoryTableReadyPromise = null;
 
+async function getLatestPaymentStatusForOrder(pool, idOrden) {
+  const columnsRes = await pool.request().query(`
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'lm5k'
+      AND TABLE_NAME = 'payments'
+      AND COLUMN_NAME IN ('status', 'paymentStatus', 'creationDate', 'createdAt')
+  `);
+
+  const columns = new Set((columnsRes.recordset || []).map((r) => String(r.COLUMN_NAME || '')));
+  if (columns.size === 0) {
+    return null;
+  }
+
+  const statusColumn = columns.has('status')
+    ? 'status'
+    : (columns.has('paymentStatus') ? 'paymentStatus' : null);
+
+  if (!statusColumn) {
+    return null;
+  }
+
+  const orderColumn = columns.has('creationDate')
+    ? 'creationDate'
+    : (columns.has('createdAt') ? 'createdAt' : 'id');
+
+  const paymentRes = await pool.request()
+    .input('IdOrden', sql.Int, idOrden)
+    .query(`
+      SELECT TOP 1 ${statusColumn} AS paymentStatus
+      FROM lm5k.payments
+      WHERE orderId = @IdOrden
+      ORDER BY ${orderColumn} DESC, id DESC
+    `);
+
+  if (!paymentRes.recordset.length) {
+    return null;
+  }
+
+  return String(paymentRes.recordset[0].paymentStatus || '').toUpperCase();
+}
+
 async function ensureOrderStatusHistoryTable(pool) {
   if (!statusHistoryTableReadyPromise) {
     statusHistoryTableReadyPromise = pool.request().query(`
@@ -344,6 +386,17 @@ router.put('/:id', async (req, res, next) => {
     const safeMotivoStatus = Number(motivoStatus) > 0 ? Number(motivoStatus) : null;
     const safeExplicacionMotivo = Number(explicacionMotivo) > 0 ? Number(explicacionMotivo) : null;
 
+    // Regla: no permitir marcar como entregada si el pago no esta confirmado.
+    if (safeStatus === 1) {
+      const latestPaymentStatus = await getLatestPaymentStatusForOrder(pool, idOrden);
+      if (latestPaymentStatus !== 'PAID') {
+        return res.status(409).json({
+          error: 'No se puede entregar la orden hasta confirmar el pago',
+          paymentStatus: latestPaymentStatus || 'WAITING_PAYMENT',
+        });
+      }
+    }
+
     if ((safeStatus === 5 || safeStatus === 6) && !safeMotivoStatus) {
       return res.status(400).json({ error: 'Para Intento 1/2 el motivo es obligatorio' });
     }
@@ -392,7 +445,13 @@ router.put('/:id', async (req, res, next) => {
                 @IdUsuario, @CurrentDate, @IdOrden, @FechaReagenda, @Latitud, @Longitud`);
     } catch (spErr) {
       // Fallback: persistir directamente en OrdenesVenta para no bloquear guardado de motivo/status
-      console.error('[spm_updateOrder] fallback update OrdenesVenta:', spErr?.message);
+      const spMessage = String(spErr?.message || '');
+      const isKnownReagendaCreationDateIssue =
+        spMessage.includes('OrdenesReagenda') && spMessage.includes('creationDate');
+
+      if (!isKnownReagendaCreationDateIssue) {
+        console.error('[spm_updateOrder] fallback update OrdenesVenta:', spMessage);
+      }
       const fallbackResult = await pool.request()
         .input('IdOrden', sql.Int, idOrden)
         .input('Status', sql.Int, safeStatus)
