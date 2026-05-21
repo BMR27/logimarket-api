@@ -386,13 +386,14 @@ router.put('/:id', async (req, res, next) => {
     const safeMotivoStatus = Number(motivoStatus) > 0 ? Number(motivoStatus) : null;
     const safeExplicacionMotivo = Number(explicacionMotivo) > 0 ? Number(explicacionMotivo) : null;
 
-    // Regla: no permitir marcar como entregada si el pago no esta confirmado.
+    // Regla: no permitir marcar como entregada si hay un pago digital pendiente.
+    // Si no existe registro en payments (pago en efectivo / sin cobro digital), se permite.
     if (safeStatus === 1) {
       const latestPaymentStatus = await getLatestPaymentStatusForOrder(pool, idOrden);
-      if (latestPaymentStatus !== 'PAID') {
+      if (latestPaymentStatus !== null && latestPaymentStatus !== 'PAID') {
         return res.status(409).json({
           error: 'No se puede entregar la orden hasta confirmar el pago',
-          paymentStatus: latestPaymentStatus || 'WAITING_PAYMENT',
+          paymentStatus: latestPaymentStatus,
         });
       }
     }
