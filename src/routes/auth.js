@@ -16,6 +16,18 @@ async function ensureSessionColumn(pool) {
       ALTER TABLE lm5k.Usuarios
       ADD sessionId NVARCHAR(64) NULL;
     END
+
+    IF COL_LENGTH('lm5k.Usuarios', 'sessionDeviceId') IS NULL
+    BEGIN
+      ALTER TABLE lm5k.Usuarios
+      ADD sessionDeviceId NVARCHAR(128) NULL;
+    END
+
+    IF COL_LENGTH('lm5k.Usuarios', 'sessionUpdatedAt') IS NULL
+    BEGIN
+      ALTER TABLE lm5k.Usuarios
+      ADD sessionUpdatedAt DATETIME NULL;
+    END
   `);
 
   sessionColumnReady = true;
@@ -28,9 +40,9 @@ async function ensureSessionColumn(pool) {
  */
 router.post('/login', async (req, res, next) => {
   try {
-    const { correo, password } = req.body;
-    if (!correo || !password) {
-      return res.status(400).json({ error: 'Correo y contraseña son requeridos' });
+    const { correo, password, deviceId, forceLogin } = req.body;
+    if (!correo || !password || !deviceId) {
+      return res.status(400).json({ error: 'Correo, contraseña y deviceId son requeridos' });
     }
 
     const pool = await getPool();
@@ -48,13 +60,36 @@ router.post('/login', async (req, res, next) => {
       case 'SUCCESS': {
         await ensureSessionColumn(pool);
 
+        const sessionCheck = await pool.request()
+          .input('idUsuario', sql.Int, row.idUsuario)
+          .query(`
+            SELECT sessionId, sessionDeviceId, sessionUpdatedAt
+            FROM lm5k.Usuarios
+            WHERE id = @idUsuario
+          `);
+
+        const existing = sessionCheck.recordset?.[0] || null;
+        const existingSessionId = existing?.sessionId ? String(existing.sessionId) : '';
+        const existingDeviceId = existing?.sessionDeviceId ? String(existing.sessionDeviceId) : '';
+
+        const shouldForceLogin = forceLogin === true || String(forceLogin).toLowerCase() === 'true';
+        if (!shouldForceLogin && existingSessionId && existingDeviceId && existingDeviceId !== String(deviceId)) {
+          return res.status(409).json({
+            error: 'Ya existe una sesión activa para este usuario. ¿Deseas cerrar la anterior y activar esta?',
+            code: 'ACTIVE_SESSION_ON_OTHER_DEVICE',
+          });
+        }
+
         const sessionId = randomUUID();
         await pool.request()
           .input('idUsuario', sql.Int, row.idUsuario)
           .input('sessionId', sql.NVarChar(64), sessionId)
+          .input('sessionDeviceId', sql.NVarChar(128), String(deviceId))
           .query(`
             UPDATE lm5k.Usuarios
             SET sessionId = @sessionId
+              , sessionDeviceId = @sessionDeviceId
+              , sessionUpdatedAt = GETDATE()
             WHERE id = @idUsuario
           `);
 
@@ -95,6 +130,45 @@ router.get('/version', async (req, res, next) => {
     res.json(result.recordset[0] || {});
   } catch (err) {
     next(err);
+  }
+});
+
+/**
+ * POST /api/auth/logout
+ * Header: Authorization: Bearer <token>
+ */
+router.post('/logout', async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Token de autorización requerido' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (!payload?.idUsuario || !payload?.sessionId) {
+      return res.status(401).json({ error: 'Sesión inválida' });
+    }
+
+    const pool = await getPool();
+    await ensureSessionColumn(pool);
+
+    await pool.request()
+      .input('idUsuario', sql.Int, Number(payload.idUsuario))
+      .input('sessionId', sql.NVarChar(64), String(payload.sessionId))
+      .query(`
+        UPDATE lm5k.Usuarios
+        SET
+          sessionId = NULL,
+          sessionDeviceId = NULL,
+          sessionUpdatedAt = NULL
+        WHERE id = @idUsuario
+          AND sessionId = @sessionId
+      `);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    return next(err);
   }
 });
 
