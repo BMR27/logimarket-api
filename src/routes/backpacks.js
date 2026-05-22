@@ -235,6 +235,31 @@ async function enrichItemsWithOrderData(pool, items) {
   }
 }
 
+async function closeActiveTripsForBackpack(pool, idBackpack) {
+  await pool.request()
+    .input('IdBackpack', sql.Int, idBackpack)
+    .query(`
+      DECLARE @IdRepartidor INT;
+
+      SELECT @IdRepartidor = b.IdRepartidor
+      FROM lm5k.tb_backpacks b WITH (NOLOCK)
+      WHERE b.Id = @IdBackpack AND ISNULL(b.Deleted, 0) = 0;
+
+      IF @IdRepartidor IS NOT NULL
+      BEGIN
+        IF OBJECT_ID(N'lm5k.tb_mensajero_ubicacion', N'U') IS NOT NULL
+        BEGIN
+          UPDATE lm5k.tb_mensajero_ubicacion
+          SET
+            enViaje = 0,
+            idOrden = NULL,
+            updatedAt = GETDATE()
+          WHERE idMensajero = @IdRepartidor;
+        END
+      END
+    `);
+}
+
 // ── Utilidad: envío de mensaje WhatsApp/SMS por número ──────────────────────
 // Configura TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM en Railway para activar envíos reales.
 // Si no están configuradas, solo loguea.
@@ -401,6 +426,11 @@ router.put('/:id', async (req, res, next) => {
     const row = result.recordset?.[0];
     if (row && row.result === 'non-affected') {
       return res.status(404).json({ error: 'Mochila no encontrada' });
+    }
+
+    // Al cerrar/finalizar mochila se cancela cualquier viaje activo del mensajero.
+    if (stateNumber === 3 || stateNumber === 4) {
+      await closeActiveTripsForBackpack(pool, idBackpack);
     }
 
     // ── Mensajes masivos al aceptar mochila (state 2 = En Ruta) ─────────────

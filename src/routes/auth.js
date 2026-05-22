@@ -1,8 +1,25 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const { randomUUID } = require('crypto');
 const { getPool, sql } = require('../config/database');
 
 const router = express.Router();
+
+let sessionColumnReady = false;
+
+async function ensureSessionColumn(pool) {
+  if (sessionColumnReady) return;
+
+  await pool.request().query(`
+    IF COL_LENGTH('lm5k.Usuarios', 'sessionId') IS NULL
+    BEGIN
+      ALTER TABLE lm5k.Usuarios
+      ADD sessionId NVARCHAR(64) NULL;
+    END
+  `);
+
+  sessionColumnReady = true;
+}
 
 /**
  * POST /api/auth/login
@@ -29,6 +46,18 @@ router.post('/login', async (req, res, next) => {
     const row = result.recordset[0];
     switch (row.response) {
       case 'SUCCESS': {
+        await ensureSessionColumn(pool);
+
+        const sessionId = randomUUID();
+        await pool.request()
+          .input('idUsuario', sql.Int, row.idUsuario)
+          .input('sessionId', sql.NVarChar(64), sessionId)
+          .query(`
+            UPDATE lm5k.Usuarios
+            SET sessionId = @sessionId
+            WHERE id = @idUsuario
+          `);
+
         const user = {
           idUsuario: row.idUsuario,
           correo: row.correo,
@@ -36,6 +65,7 @@ router.post('/login', async (req, res, next) => {
           apellidoPaterno: row.apellidoPaterno,
           apellidoMaterno: row.apellidoMaterno,
           type: row.origin,
+          sessionId,
         };
         const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '7d' });
         return res.json({ token, user });
