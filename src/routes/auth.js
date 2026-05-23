@@ -1,11 +1,25 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const { randomUUID } = require('crypto');
+const { randomUUID, createHash } = require('crypto');
 const { getPool, sql } = require('../config/database');
 
 const router = express.Router();
 
 let sessionColumnReady = false;
+
+function resolveDeviceId(rawDeviceId, req) {
+  const normalized = typeof rawDeviceId === 'string' ? rawDeviceId.trim() : '';
+  if (normalized) return normalized;
+
+  const userAgent = req.get('user-agent') || 'unknown';
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const fingerprint = createHash('sha256')
+    .update(`${userAgent}|${ip}`)
+    .digest('hex')
+    .slice(0, 32);
+
+  return `fallback-${fingerprint}`;
+}
 
 async function ensureSessionColumn(pool) {
   if (sessionColumnReady) return;
@@ -40,10 +54,11 @@ async function ensureSessionColumn(pool) {
  */
 router.post('/login', async (req, res, next) => {
   try {
-    const { correo, password, deviceId, forceLogin } = req.body;
-    if (!correo || !password || !deviceId) {
-      return res.status(400).json({ error: 'Correo, contraseña y deviceId son requeridos' });
+    const { correo, password, deviceId, forceLogin } = req.body || {};
+    if (!correo || !password) {
+      return res.status(400).json({ error: 'Correo y contraseña son requeridos' });
     }
+    const resolvedDeviceId = resolveDeviceId(deviceId, req);
 
     const pool = await getPool();
     const result = await pool.request()
@@ -73,7 +88,7 @@ router.post('/login', async (req, res, next) => {
         const existingDeviceId = existing?.sessionDeviceId ? String(existing.sessionDeviceId) : '';
 
         const shouldForceLogin = forceLogin === true || String(forceLogin).toLowerCase() === 'true';
-        if (!shouldForceLogin && existingSessionId && existingDeviceId && existingDeviceId !== String(deviceId)) {
+        if (!shouldForceLogin && existingSessionId && existingDeviceId && existingDeviceId !== resolvedDeviceId) {
           return res.status(409).json({
             error: 'Ya existe una sesión activa para este usuario. ¿Deseas cerrar la anterior y activar esta?',
             code: 'ACTIVE_SESSION_ON_OTHER_DEVICE',
@@ -84,7 +99,7 @@ router.post('/login', async (req, res, next) => {
         await pool.request()
           .input('idUsuario', sql.Int, row.idUsuario)
           .input('sessionId', sql.NVarChar(64), sessionId)
-          .input('sessionDeviceId', sql.NVarChar(128), String(deviceId))
+          .input('sessionDeviceId', sql.NVarChar(128), resolvedDeviceId)
           .query(`
             UPDATE lm5k.Usuarios
             SET sessionId = @sessionId
