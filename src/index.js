@@ -18,16 +18,9 @@ const ubicacionRoutes = require('./routes/ubicacion');
 const publicPaymentsRoutes = require('./routes/publicPayments');
 const mockPaymentsRoutes = require('./routes/mockPayments');
 const payCheckoutRoutes = require('./routes/payCheckout');
+const stripeWebhookRoutes = require('./routes/stripeWebhook');
 const { errorHandler } = require('./middleware/errorHandler');
 const { authenticate } = require('./middleware/auth');
-
-let stripeWebhookRoutes = null;
-try {
-  // Optional route: in some deployments this module may not be present yet.
-  stripeWebhookRoutes = require('./routes/stripeWebhook');
-} catch (err) {
-  console.warn('Stripe webhook route not loaded:', err?.message || err);
-}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
