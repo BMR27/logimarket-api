@@ -32,6 +32,9 @@ try {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Railway y otros proxies envían X-Forwarded-For; express-rate-limit requiere trust proxy activo.
+app.set('trust proxy', 1);
+
 // Seguridad
 app.use(helmet());
 app.use(cors({
