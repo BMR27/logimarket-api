@@ -7,6 +7,16 @@ const router = express.Router();
 
 let sessionColumnReady = false;
 
+function toInt(value, fallback = 0) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function toStringValue(value, fallback = '') {
+  if (value === null || value === undefined) return fallback;
+  return String(value);
+}
+
 function resolveDeviceId(rawDeviceId, req) {
   const normalized = typeof rawDeviceId === 'string' ? rawDeviceId.trim() : '';
   if (normalized) return normalized;
@@ -109,12 +119,12 @@ router.post('/login', async (req, res, next) => {
           `);
 
         const user = {
-          idUsuario: row.idUsuario,
-          correo: row.correo,
-          nombres: row.nombres,
-          apellidoPaterno: row.apellidoPaterno,
-          apellidoMaterno: row.apellidoMaterno,
-          type: row.origin,
+          idUsuario: toInt(row.idUsuario, 0),
+          correo: toStringValue(row.correo, ''),
+          nombres: toStringValue(row.nombres, ''),
+          apellidoPaterno: toStringValue(row.apellidoPaterno, ''),
+          apellidoMaterno: toStringValue(row.apellidoMaterno, ''),
+          type: toStringValue(row.origin, ''),
           sessionId,
         };
         const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '7d' });
