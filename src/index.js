@@ -18,6 +18,7 @@ const ubicacionRoutes = require('./routes/ubicacion');
 const publicPaymentsRoutes = require('./routes/publicPayments');
 const mockPaymentsRoutes = require('./routes/mockPayments');
 const payCheckoutRoutes = require('./routes/payCheckout');
+const stripeWebhookRoutes = require('./routes/stripeWebhook');
 const { errorHandler } = require('./middleware/errorHandler');
 const { authenticate } = require('./middleware/auth');
 
@@ -41,9 +42,16 @@ app.use(rateLimit({
   message: { error: 'Demasiadas solicitudes, intenta más tarde' },
 }));
 
+// Stripe webhook requiere body crudo para validar firma antes de parsear JSON.
+app.use('/api/public/payments/stripe', stripeWebhookRoutes);
+
 app.use(express.json({ limit: '1mb' }));
 
 // Health check (público)
+app.get('/', (req, res) => {
+  res.json({ status: 'OK', service: 'logimarket-api' });
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
