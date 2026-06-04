@@ -3,6 +3,7 @@ const express = require('express');
 const { getPool } = require('../config/database');
 const {
   PAYMENT_STATUS,
+  buildManualTransferReference,
   buildManualTransferDetails,
   confirmPaymentByProviderPaymentId,
   ensurePaymentsSchema,
@@ -19,6 +20,7 @@ const {
   scheduleMockConfirmation,
   setProviderPaymentId,
 } = require('../services/payments');
+const { isStripeProvider } = require('../services/stripe');
 
 const router = express.Router();
 
@@ -157,6 +159,21 @@ router.post('/:paymentToken/pay', async (req, res, next) => {
         bankTransfer,
         payment: paymentResponse,
         message: 'Transfiere manualmente a la cuenta indicada y conserva la referencia.',
+      });
+    }
+
+    if (isStripeProvider(provider)) {
+      const order = await getOrderById(pool, payment.orderId);
+      return res.json({
+        success: true,
+        provider,
+        status: String(payment.status),
+        paymentStatus: String(payment.status),
+        providerPaymentId: payment.providerPaymentId,
+        paymentUrl: payment.checkoutUrl,
+        qrCodeUrl: payment.qrCodeUrl,
+        payment: formatPaymentResponse(payment, order),
+        message: 'Abre el checkout de Stripe para completar el pago.',
       });
     }
 

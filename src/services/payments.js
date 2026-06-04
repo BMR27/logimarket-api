@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { sql } = require('../config/database');
+const { createStripeCheckoutSession, isStripeProvider, stripeCurrency } = require('./stripe');
 
 let schemaReadyPromise = null;
 
@@ -236,6 +237,20 @@ async function getPaymentByToken(pool, paymentToken) {
   return result.recordset?.[0] || null;
 }
 
+async function getPaymentByProviderPaymentId(pool, providerPaymentId) {
+  const result = await pool.request()
+    .input('ProviderPaymentId', sql.NVarChar(120), String(providerPaymentId || '').trim())
+    .query(`
+      SELECT TOP 1 *
+      FROM lm5k.payments
+      WHERE providerPaymentId = @ProviderPaymentId
+        AND deleted = 0
+      ORDER BY id DESC
+    `);
+
+  return result.recordset?.[0] || null;
+}
+
 async function getLatestPaymentByOrder(pool, orderId) {
   const result = await pool.request()
     .input('OrderId', sql.Int, Number(orderId))
@@ -364,18 +379,38 @@ async function createPaymentForOrder(pool, req, orderId) {
   const provider = paymentProvider();
   const token = crypto.randomUUID();
   const base = getCheckoutBaseUrl(req);
-  const checkoutUrl = `${base}/pay/${token}`;
-  const qrCodeUrl = qrCodeUrlFor(checkoutUrl);
   const amount = roundMoney(order.amount);
+  const currency = stripeCurrency().toUpperCase();
   const commissionAmount = roundMoney(amount * paymentCommissionRate());
   const netAmount = roundMoney(amount - commissionAmount);
+
+  let checkoutUrl = `${base}/pay/${token}`;
+  let providerPaymentId = null;
+
+  if (isStripeProvider(provider)) {
+    const stripeSession = await createStripeCheckoutSession({
+      paymentToken: token,
+      orderId,
+      amount,
+      currency,
+      trackingNumber: order?.trackingNumber || String(orderId),
+      customerName: order?.customerName || '',
+      successUrl: `${base}/pay/${token}?result=success`,
+      cancelUrl: `${base}/pay/${token}?result=cancel`,
+    });
+    checkoutUrl = stripeSession.url;
+    providerPaymentId = stripeSession.id;
+  }
+
+  const qrCodeUrl = qrCodeUrlFor(checkoutUrl);
 
   const insertResult = await pool.request()
     .input('OrderId', sql.Int, Number(orderId))
     .input('Provider', sql.NVarChar(50), provider)
+    .input('ProviderPaymentId', sql.NVarChar(120), providerPaymentId)
     .input('PaymentToken', sql.NVarChar(120), token)
     .input('Amount', sql.Decimal(18, 2), amount)
-    .input('Currency', sql.NVarChar(10), 'MXN')
+    .input('Currency', sql.NVarChar(10), currency)
     .input('CommissionAmount', sql.Decimal(18, 2), commissionAmount)
     .input('NetAmount', sql.Decimal(18, 2), netAmount)
     .input('CheckoutUrl', sql.NVarChar(500), checkoutUrl)
@@ -383,10 +418,10 @@ async function createPaymentForOrder(pool, req, orderId) {
     .input('ExpiresAt', sql.DateTime2, new Date(Date.now() + paymentExpiryMinutes() * 60000))
     .query(`
       INSERT INTO lm5k.payments
-        (orderId, provider, paymentToken, amount, currency, commissionAmount, netAmount, checkoutUrl, qrCodeUrl, status, expiresAt, creationDate, lastModifiedDate, deleted)
+        (orderId, provider, providerPaymentId, paymentToken, amount, currency, commissionAmount, netAmount, checkoutUrl, qrCodeUrl, status, expiresAt, creationDate, lastModifiedDate, deleted)
       OUTPUT INSERTED.*
       VALUES
-        (@OrderId, @Provider, @PaymentToken, @Amount, @Currency, @CommissionAmount, @NetAmount, @CheckoutUrl, @QrCodeUrl, '${PAYMENT_STATUS.WAITING_PAYMENT}', @ExpiresAt, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)
+        (@OrderId, @Provider, @ProviderPaymentId, @PaymentToken, @Amount, @Currency, @CommissionAmount, @NetAmount, @CheckoutUrl, @QrCodeUrl, '${PAYMENT_STATUS.WAITING_PAYMENT}', @ExpiresAt, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)
     `);
 
   const payment = insertResult.recordset?.[0];
@@ -523,6 +558,7 @@ module.exports = {
   getLatestPaymentByOrder,
   getOrderById,
   getPaymentByToken,
+  getPaymentByProviderPaymentId,
   getPaymentDestinationAccount,
   getPaymentBankName,
   getPaymentBeneficiaryName,
