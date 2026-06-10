@@ -4,6 +4,7 @@ const { getPool, sql } = require('../config/database');
 const router = express.Router();
 
 let statusHistoryTableReadyPromise = null;
+let priceChangeRequestsTableReadyPromise = null;
 
 async function getLatestPaymentStatusForOrder(pool, idOrden) {
   const columnsRes = await pool.request().query(`
@@ -73,6 +74,40 @@ async function ensureOrderStatusHistoryTable(pool) {
     `);
   }
   await statusHistoryTableReadyPromise;
+}
+
+async function ensurePriceChangeRequestsTable(pool) {
+  if (!priceChangeRequestsTableReadyPromise) {
+    priceChangeRequestsTableReadyPromise = pool.request().query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.objects
+        WHERE object_id = OBJECT_ID(N'lm5k.SolicitudesCambioOrden') AND type = 'U'
+      )
+      BEGIN
+        CREATE TABLE lm5k.SolicitudesCambioOrden (
+          id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+          idOrden INT NOT NULL,
+          idUsuarioSolicita INT NOT NULL,
+          precioSolicitado DECIMAL(18,2) NOT NULL,
+          totalAutorizado DECIMAL(18,2) NULL,
+          motivoSolicitud NVARCHAR(500) NULL,
+          estadoSolicitud NVARCHAR(30) NOT NULL DEFAULT 'pendiente',
+          creationDate DATETIME NOT NULL DEFAULT GETDATE(),
+          lastModifiedDate DATETIME NOT NULL DEFAULT GETDATE(),
+          modifiedById INT NOT NULL DEFAULT 0,
+          deleted BIT NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IX_SolicitudesCambioOrden_Orden_Estado
+          ON lm5k.SolicitudesCambioOrden (idOrden, estadoSolicitud, creationDate DESC)
+          WHERE deleted = 0;
+      END
+    `).catch((err) => {
+      priceChangeRequestsTableReadyPromise = null;
+      throw err;
+    });
+  }
+  await priceChangeRequestsTableReadyPromise;
 }
 
 /**
@@ -633,6 +668,7 @@ router.post('/:id/price-request', async (req, res, next) => {
     }
 
     const pool = await getPool();
+    await ensurePriceChangeRequestsTable(pool);
 
     // Cancelar solicitudes previas pendientes de esta orden
     await pool.request()
@@ -668,6 +704,8 @@ router.get('/:id/price-request', async (req, res, next) => {
     if (isNaN(idOrden)) return res.status(400).json({ error: 'ID inválido' });
 
     const pool = await getPool();
+    await ensurePriceChangeRequestsTable(pool);
+
     const result = await pool.request()
       .input('IdOrden', sql.Int, idOrden)
       .query(`SELECT TOP 1 id, precioSolicitado, totalAutorizado, estadoSolicitud, motivoSolicitud, creationDate
