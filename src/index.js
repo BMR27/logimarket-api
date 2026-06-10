@@ -110,6 +110,17 @@ app.use('/api/ubicacion', ubicacionRoutes);
 // Manejo de errores
 app.use(errorHandler);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Logimarket API corriendo en puerto ${PORT}`);
 });
+
+const shutdown = (signal) => {
+  console.log(`${signal} recibido; cerrando Logimarket API de forma controlada`);
+  server.close(() => {
+    console.log('Servidor HTTP cerrado');
+    process.exit(0);
+  });
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
