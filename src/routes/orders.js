@@ -322,6 +322,19 @@ router.get('/:id', async (req, res, next) => {
       return res.json(enriched);
     }
 
+    const optionalOrderColumnsRes = await pool.request().query(`
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'lm5k'
+        AND TABLE_NAME = 'OrdenesVenta'
+        AND COLUMN_NAME IN ('Metros', 'Tiempo')
+    `);
+    const optionalOrderColumns = new Set(
+      (optionalOrderColumnsRes.recordset || []).map((row) => String(row.COLUMN_NAME || ''))
+    );
+    const metrosSelect = optionalOrderColumns.has('Metros') ? 'ov.Metros' : 'NULL AS Metros';
+    const tiempoSelect = optionalOrderColumns.has('Tiempo') ? 'ov.Tiempo' : 'NULL AS Tiempo';
+
     // Fallback: si el SP no encuentra por filtro de equipos, intentar por ID directo.
     // Esto evita falsos 404 para órdenes válidas visibles en mochila/entregas.
     const fallback = await pool.request()
@@ -356,8 +369,8 @@ router.get('/:id', async (req, res, next) => {
           CONVERT(VARCHAR(19), ov.fechaEntrega, 120) AS fechaEntrega,
           ov.Latitud,
           ov.Longitud,
-          ov.Metros,
-          ov.Tiempo
+          ${metrosSelect},
+          ${tiempoSelect}
         FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
         LEFT JOIN lm5k.StatusOrdenes os WITH (NOLOCK)
           ON os.id = ov.idStatus

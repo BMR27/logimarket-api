@@ -24,6 +24,13 @@ const { authenticate } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const parsePositiveInt = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+const RATE_LIMIT_WINDOW_MS = parsePositiveInt(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000);
+const RATE_LIMIT_MAX = parsePositiveInt(process.env.RATE_LIMIT_MAX, 2000);
+const AUTH_RATE_LIMIT_MAX = parsePositiveInt(process.env.AUTH_RATE_LIMIT_MAX, 30);
 
 // Railway y otros proxies envían X-Forwarded-For; express-rate-limit requiere trust proxy activo.
 app.set('trust proxy', 1);
@@ -36,14 +43,29 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Rate limiting: 200 requests por 15 minutos por IP
+const rateLimitMessage = {
+  error: 'Demasiadas solicitudes, intenta más tarde',
+  message: 'Demasiadas solicitudes, intenta más tarde',
+};
+
+// Rate limiting global: la app móvil hace polling frecuente, así que el límite debe tolerar uso normal.
 app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Demasiadas solicitudes, intenta más tarde' },
+  skip: (req) => req.method === 'OPTIONS' || req.path === '/' || req.path === '/health',
+  message: rateLimitMessage,
 }));
+
+const authLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: AUTH_RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: rateLimitMessage,
+});
 
 // Stripe webhook requiere body crudo para validar firma antes de parsear JSON.
 if (stripeWebhookRoutes) {
@@ -62,7 +84,7 @@ app.get('/health', (req, res) => {
 });
 
 // Rutas públicas
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/public/payments', publicPaymentsRoutes);
 app.use('/api/mock/payments', mockPaymentsRoutes);
 app.use('/pay', payCheckoutRoutes);
