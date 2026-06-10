@@ -145,7 +145,7 @@ router.post('/login', async (req, res, next) => {
               u.nombres,
               u.apellidoPaterno,
               u.apellidoMaterno,
-              LOWER(ISNULL(r.rol, ISNULL(r.nombre, 'mensajero'))) AS origin,
+              LOWER(ISNULL(r.rol, 'mensajero')) AS origin,
               u.sessionId,
               u.sessionDeviceId
             FROM lm5k.Usuarios u
