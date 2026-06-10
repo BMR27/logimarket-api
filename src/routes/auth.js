@@ -145,11 +145,10 @@ router.post('/login', async (req, res, next) => {
               u.nombres,
               u.apellidoPaterno,
               u.apellidoMaterno,
-              LOWER(ISNULL(r.rol, 'mensajero')) AS origin,
+              'mensajero'  AS origin,
               u.sessionId,
               u.sessionDeviceId
             FROM lm5k.Usuarios u
-            LEFT JOIN lm5k.Roles r ON r.id = u.idRol
             WHERE u.correo = @correo
               AND ISNULL(u.deleted, 0) = 0
           `);
