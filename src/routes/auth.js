@@ -132,8 +132,64 @@ router.post('/login', async (req, res, next) => {
       }
       case 'INVALID_CREDENTIALS':
         return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
-      case 'INVALID_ROL':
-        return res.status(403).json({ error: 'El rol de su usuario no tiene permiso de acceso' });
+      case 'INVALID_ROL': {
+        // El SP rechaza el rol, pero las credenciales son válidas.
+        // Consultamos la BD directamente para obtener el usuario y su rol.
+        await ensureSessionColumn(pool);
+        const fallbackRes = await pool.request()
+          .input('correo', sql.NVarChar(200), correo)
+          .query(`
+            SELECT TOP 1
+              u.id        AS idUsuario,
+              u.correo,
+              u.nombres,
+              u.apellidoPaterno,
+              u.apellidoMaterno,
+              LOWER(ISNULL(r.rol, ISNULL(r.nombre, 'mensajero'))) AS origin,
+              u.sessionId,
+              u.sessionDeviceId
+            FROM lm5k.Usuarios u
+            LEFT JOIN lm5k.Roles r ON r.id = u.idRol
+            WHERE u.correo = @correo
+              AND ISNULL(u.deleted, 0) = 0
+          `);
+
+        if (!fallbackRes.recordset?.length) {
+          return res.status(403).json({ error: 'El rol de su usuario no tiene permiso de acceso' });
+        }
+
+        const fb = fallbackRes.recordset[0];
+        const shouldForceLoginFb = forceLogin === true || String(forceLogin).toLowerCase() === 'true';
+        if (!shouldForceLoginFb && fb.sessionId && fb.sessionDeviceId && fb.sessionDeviceId !== resolvedDeviceId) {
+          return res.status(409).json({
+            error: 'Ya existe una sesión activa para este usuario. ¿Deseas cerrar la anterior y activar esta?',
+            code: 'ACTIVE_SESSION_ON_OTHER_DEVICE',
+          });
+        }
+
+        const sessionIdFb = randomUUID();
+        await pool.request()
+          .input('idUsuario', sql.Int, toInt(fb.idUsuario, 0))
+          .input('sessionId', sql.NVarChar(64), sessionIdFb)
+          .input('sessionDeviceId', sql.NVarChar(128), resolvedDeviceId)
+          .query(`
+            UPDATE lm5k.Usuarios
+            SET sessionId = @sessionId, sessionDeviceId = @sessionDeviceId, sessionUpdatedAt = GETDATE()
+            WHERE id = @idUsuario
+          `);
+
+        const userFb = {
+          idUsuario: toInt(fb.idUsuario, 0),
+          correo: toStringValue(fb.correo, ''),
+          nombres: toStringValue(fb.nombres, ''),
+          apellidoPaterno: toStringValue(fb.apellidoPaterno, ''),
+          apellidoMaterno: toStringValue(fb.apellidoMaterno, ''),
+          type: toStringValue(fb.origin, 'mensajero'),
+          sessionId: sessionIdFb,
+        };
+        const tokenFb = jwt.sign(userFb, process.env.JWT_SECRET, { expiresIn: '7d' });
+        return res.json({ token: tokenFb, user: userFb });
+      }
       case 'INVALID_USER':
         return res.status(403).json({ error: 'Usuario deshabilitado' });
       default:
