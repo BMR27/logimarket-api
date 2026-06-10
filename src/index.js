@@ -54,7 +54,12 @@ app.use(rateLimit({
   max: RATE_LIMIT_MAX,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.method === 'OPTIONS' || req.path === '/' || req.path === '/health',
+  skip: (req) => (
+    req.method === 'OPTIONS' ||
+    req.path === '/' ||
+    req.path === '/health' ||
+    (req.path.startsWith('/api/') && Boolean(req.headers.authorization))
+  ),
   message: rateLimitMessage,
 }));
 
