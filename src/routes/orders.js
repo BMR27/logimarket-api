@@ -434,6 +434,16 @@ router.put('/:id', async (req, res, next) => {
     const safeMotivoStatus = Number(motivoStatus) > 0 ? Number(motivoStatus) : null;
     const safeExplicacionMotivo = Number(explicacionMotivo) > 0 ? Number(explicacionMotivo) : null;
 
+    // Regla: una orden que ya llegó a Depositada (10) o Pagada (11) ya pasó por el corte de
+    // equipo y/o el corte cliente (facturación). Esta app no tiene noción de roles admin, así
+    // que aquí el bloqueo es total: si el repartidor re-escanea/re-confirma una orden en ese
+    // punto del flujo, queda invisible para esos cortes sin que nadie se entere.
+    if ([10, 11].includes(currentStatus) && safeStatus !== currentStatus) {
+      return res.status(409).json({
+        error: 'Esta orden ya fue Depositada o Pagada y no se puede modificar desde la app. Contacta a un administrador.',
+      });
+    }
+
     // Regla: no permitir marcar como entregada si hay un pago digital pendiente.
     // Si no existe registro en payments (pago en efectivo / sin cobro digital), se permite.
     if (safeStatus === 1) {
