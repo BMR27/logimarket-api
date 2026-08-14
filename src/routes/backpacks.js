@@ -27,7 +27,6 @@ async function getBlockingBackpacks(pool, idRepartidor, excludeBackpackId = null
     GROUP BY b.Id, b.State
     HAVING
       b.State IN (1, 2)
-      OR (b.State = 3 AND SUM(CASE WHEN cb.IdOrdenVenta IS NOT NULL AND ISNULL(cb.Validation, 0) <> 1 THEN 1 ELSE 0 END) > 0)
     ORDER BY b.Id DESC
   `);
 
@@ -395,26 +394,6 @@ router.put('/:id', async (req, res, next) => {
             code: 'MOCHILA_PENDIENTE',
           });
         }
-      }
-    }
-
-    if (stateNumber === 3) {
-      // Valida contra la tabla base para que coincida con el flujo de escaneo por folio.
-      const pendingResult = await pool.request()
-        .input('IdBackpack', sql.Int, idBackpack)
-        .query(`
-          SELECT COUNT(1) AS pendingCount
-          FROM lm5k.tb_contenido_backpacks cb
-          WHERE cb.IdBackPack = @IdBackpack
-            AND cb.Deleted = 0
-            AND ISNULL(cb.Validation, 0) <> 1
-        `);
-
-      const pendingCount = Number(pendingResult.recordset?.[0]?.pendingCount ?? 0);
-      if (pendingCount > 0) {
-        return res.status(400).json({
-          error: 'Debes validar todas las entregas antes de finalizar la mochila',
-        });
       }
     }
 
