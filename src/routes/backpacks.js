@@ -336,6 +336,38 @@ router.post('/', async (req, res, next) => {
       });
     }
 
+    // Regla: no se pueden asignar a una mochila órdenes que ya son Exitosa (1),
+    // Depositada (10) o Pagada (11) — ya pasaron por el corte de equipo y/o cliente.
+    const orderIdList = String(orderIds)
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n));
+
+    if (orderIdList.length > 0) {
+      const statusRequest = pool.request();
+      const placeholders = orderIdList.map((id, idx) => {
+        const paramName = `orderId${idx}`;
+        statusRequest.input(paramName, sql.Int, id);
+        return `@${paramName}`;
+      });
+      const statusCheck = await statusRequest.query(`
+        SELECT o.id, o.folioOrdenCliente, s.status
+        FROM lm5k.OrdenesVenta o
+        LEFT JOIN lm5k.StatusOrdenes s ON s.id = o.idStatus
+        WHERE o.id IN (${placeholders.join(',')}) AND o.idStatus IN (1, 10, 11)
+      `);
+
+      if (statusCheck.recordset.length > 0) {
+        const blocked = statusCheck.recordset
+          .map((r) => `${r.folioOrdenCliente || r.id} (${r.status})`)
+          .join(', ');
+        return res.status(409).json({
+          error: `No se pueden asignar órdenes en estatus Exitosa, Depositada o Pagada: ${blocked}`,
+          code: 'ORDENES_NO_ASIGNABLES',
+        });
+      }
+    }
+
     const result = await pool.request()
       .input('IdRepartidor', sql.Int, idRepartidor)
       .input('IdLider', sql.Int, idLider)
