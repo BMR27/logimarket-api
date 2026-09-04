@@ -1,5 +1,6 @@
 const express = require('express');
 const { getPool, sql } = require('../config/database');
+const { enrichOrdenesConComision, calcularComisionesOrdenes } = require('../services/comisiones.service');
 
 const router = express.Router();
 
@@ -123,7 +124,8 @@ router.get('/', async (req, res, next) => {
       .input('equipos', sql.NVarChar(500), equipos)
       .input('folio', sql.NVarChar(100), folio)
       .query('EXEC lm5k.spm_getOrdenesVenta_debug @equipos, @folio');
-    res.json(result.recordset);
+    const enriched = await enrichOrdenesConComision(pool, result.recordset);
+    res.json(enriched);
   } catch (err) {
     next(err);
   }
@@ -143,7 +145,8 @@ router.get('/paginated', async (req, res, next) => {
       .input('folio', sql.NVarChar(100), folio)
       .input('lastId', sql.Int, parseInt(lastId, 10))
       .query('EXEC lm5k.spm_getOrdenVenta @equipos, @folio, @lastId');
-    res.json(result.recordset);
+    const enriched = await enrichOrdenesConComision(pool, result.recordset);
+    res.json(enriched);
   } catch (err) {
     next(err);
   }
@@ -162,7 +165,8 @@ router.get('/ways', async (req, res, next) => {
       .input('equipos', sql.NVarChar(500), equipos)
       .input('folio', sql.NVarChar(100), folio)
       .query('EXEC lm5k.spm_getOrdenVentaForWays @equipos, @folio');
-    res.json(result.recordset);
+    const enriched = await enrichOrdenesConComision(pool, result.recordset);
+    res.json(enriched);
   } catch (err) {
     next(err);
   }
@@ -316,9 +320,33 @@ router.get('/:id', async (req, res, next) => {
       }
     };
 
+    const enrichComisionFromOrdenVenta = async (baseRow) => {
+      try {
+        const idRow = baseRow?.Id ?? baseRow?.id;
+        const equipoRes = await pool.request()
+          .input('Id', sql.Int, idRow)
+          .query('SELECT TOP 1 idEquipo FROM lm5k.OrdenesVenta WHERE id = @Id AND ISNULL(deleted,0) = 0');
+        const idEquipo = equipoRes.recordset[0]?.idEquipo;
+        if (!idEquipo) return { ...baseRow, comisionEquipo: null };
+        const comisiones = await calcularComisionesOrdenes(pool, [{
+          id: idRow,
+          idEquipo,
+          codigoPostal: baseRow.codigoPostal,
+          colonia: baseRow.colonia,
+          total: baseRow.Total ?? baseRow.total,
+        }]);
+        const com = comisiones.get(idRow);
+        return { ...baseRow, comisionEquipo: com ? com.comisionEquipo : null };
+      } catch (err) {
+        console.error('[orders/:id] enrichComisionFromOrdenVenta fallo:', err?.message || err);
+        return { ...baseRow, comisionEquipo: null };
+      }
+    };
+
     if (result.recordset.length) {
       const withMotivo = await enrichMotivoFromOrdenVenta(result.recordset[0]);
-      const enriched = await enrichFechaReagendaFromOrdenVenta(withMotivo);
+      const withFecha = await enrichFechaReagendaFromOrdenVenta(withMotivo);
+      const enriched = await enrichComisionFromOrdenVenta(withFecha);
       return res.json(enriched);
     }
 
@@ -385,7 +413,8 @@ router.get('/:id', async (req, res, next) => {
     }
 
     const withMotivoFallback = await enrichMotivoFromOrdenVenta(fallback.recordset[0]);
-    const enrichedFallback = await enrichFechaReagendaFromOrdenVenta(withMotivoFallback);
+    const withFechaFallback = await enrichFechaReagendaFromOrdenVenta(withMotivoFallback);
+    const enrichedFallback = await enrichComisionFromOrdenVenta(withFechaFallback);
     res.json(enrichedFallback);
   } catch (err) {
     next(err);
