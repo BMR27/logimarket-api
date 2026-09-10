@@ -10,21 +10,28 @@ function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
+// A diferencia de `!= null`, también descarta strings vacíos, NaN, etc. —
+// cualquier valor que no sea bindeable como sql.Int sin que tedious truene.
+function isValidId(v) {
+  if (v === null || v === undefined || v === '') return false;
+  return Number.isInteger(Number(v));
+}
+
 /**
  * @param {import('mssql').ConnectionPool} pool
  * @param {Array<{id: number, idEquipo: number, codigoPostal?: string, colonia?: string, total?: number}>} ordenes
  * @returns {Promise<Map<number, {cobertura: string, comisionEquipo: number, neto: number}>>}
  */
 async function calcularComisionesOrdenes(pool, ordenes) {
-  const validas = ordenes.filter((o) => o && o.id != null && o.idEquipo);
+  const validas = ordenes.filter((o) => o && isValidId(o.id) && isValidId(o.idEquipo));
   const resultado = new Map();
   if (!validas.length) return resultado;
 
   const request = pool.request();
   const valuesSql = validas
     .map((o, i) => {
-      request.input(`id${i}`, sql.Int, o.id);
-      request.input(`idEquipo${i}`, sql.Int, o.idEquipo);
+      request.input(`id${i}`, sql.Int, Number(o.id));
+      request.input(`idEquipo${i}`, sql.Int, Number(o.idEquipo));
       request.input(`cp${i}`, sql.NVarChar(20), o.codigoPostal || '');
       request.input(`colonia${i}`, sql.NVarChar(200), o.colonia || '');
       request.input(`total${i}`, sql.Decimal(18, 2), Number(o.total) || 0);
@@ -106,7 +113,16 @@ async function enrichOrdenesConComision(pool, filas) {
     colonia: f.colonia,
     total: f.total ?? f.Total,
   }));
-  const comisiones = await calcularComisionesOrdenes(pool, normalizadas);
+  let comisiones;
+  try {
+    comisiones = await calcularComisionesOrdenes(pool, normalizadas);
+  } catch (err) {
+    // Calcular la comisión es un enriquecimiento secundario — si falla, no debe
+    // tumbar la lista de órdenes completa (ej. el mensajero se queda sin poder
+    // ver sus órdenes). Se degrada devolviendo las filas sin comisionEquipo.
+    console.error('[comisiones.service] Error al calcular comisiones, se omite el enriquecimiento:', err?.message);
+    return filas.map((f) => ({ ...f, comisionEquipo: null }));
+  }
   return filas.map((f) => {
     const id = f.id ?? f.Id;
     const com = comisiones.get(id);
