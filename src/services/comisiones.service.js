@@ -101,12 +101,39 @@ async function calcularComisionesOrdenes(pool, ordenes) {
 }
 
 /**
+ * Los SPs de listado (spm_getOrdenesVenta_debug, spm_getOrdenVenta,
+ * spm_getOrdenVentaForWays) no seleccionan idEquipo, así que se resuelve aquí
+ * con un lookup batch — igual que ya hacía el endpoint de detalle por fila.
+ */
+async function resolverIdEquiposFaltantes(pool, normalizadas) {
+  const idsFaltantes = normalizadas
+    .filter((o) => isValidId(o.id) && !isValidId(o.idEquipo))
+    .map((o) => Number(o.id));
+  if (!idsFaltantes.length) return normalizadas;
+
+  const request = pool.request();
+  const idParams = idsFaltantes.map((id, i) => {
+    request.input(`ovid${i}`, sql.Int, id);
+    return `@ovid${i}`;
+  });
+  const result = await request.query(`
+    SELECT id, idEquipo FROM lm5k.OrdenesVenta
+    WHERE id IN (${idParams.join(',')}) AND ISNULL(deleted, 0) = 0
+  `);
+  const idEquipoPorOrden = new Map(result.recordset.map((r) => [r.id, r.idEquipo]));
+
+  return normalizadas.map((o) =>
+    isValidId(o.idEquipo) ? o : { ...o, idEquipo: idEquipoPorOrden.get(Number(o.id)) }
+  );
+}
+
+/**
  * Aplica comisionEquipo/neto a una lista de filas de orden (mutación por copia,
  * no destructiva). Cada fila debe traer id/idEquipo/codigoPostal/colonia/total
  * (acepta variantes de casing Id/Total usadas por algunos SPs legacy).
  */
 async function enrichOrdenesConComision(pool, filas) {
-  const normalizadas = filas.map((f) => ({
+  let normalizadas = filas.map((f) => ({
     id: f.id ?? f.Id,
     idEquipo: f.idEquipo,
     codigoPostal: f.codigoPostal,
@@ -114,6 +141,11 @@ async function enrichOrdenesConComision(pool, filas) {
     total: f.total ?? f.Total,
   }));
   let comisiones;
+  try {
+    normalizadas = await resolverIdEquiposFaltantes(pool, normalizadas);
+  } catch (err) {
+    console.error('[comisiones.service] Error al resolver idEquipo faltante:', err?.message);
+  }
   try {
     comisiones = await calcularComisionesOrdenes(pool, normalizadas);
   } catch (err) {
