@@ -188,8 +188,7 @@ router.get('/:id/address', async (req, res, next) => {
       .query(`
         SELECT id, folioOrdenCliente,
                calle, numExterior, numInterior, colonia,
-               municipioDelegacion, estado, codigoPostal,
-               Latitud, Longitud
+               municipioDelegacion, estado, codigoPostal
         FROM lm5k.OrdenesVenta
         WHERE id = @Id AND ISNULL(deleted, 0) = 0
       `);
@@ -395,8 +394,6 @@ router.get('/:id', async (req, res, next) => {
           '' AS explicacionMotivo,
           CONVERT(VARCHAR(19), ov.fechaPedido, 120) AS fechaPedido,
           CONVERT(VARCHAR(19), ov.fechaEntrega, 120) AS fechaEntrega,
-          ov.Latitud,
-          ov.Longitud,
           ${metrosSelect},
           ${tiempoSelect}
         FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
