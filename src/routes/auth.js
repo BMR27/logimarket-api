@@ -225,7 +225,14 @@ router.post('/logout', async (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (jwtErr) {
+      // Token vencido o inválido al cerrar sesión es un caso esperado (no un error de
+      // servidor) — no hay nada que limpiar en BD si la sesión ya no es válida.
+      return res.status(401).json({ error: 'Sesión inválida o expirada' });
+    }
     if (!payload?.idUsuario || !payload?.sessionId) {
       return res.status(401).json({ error: 'Sesión inválida' });
     }
