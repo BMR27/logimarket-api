@@ -7,6 +7,14 @@ const router = express.Router();
 let statusHistoryTableReadyPromise = null;
 let priceChangeRequestsTableReadyPromise = null;
 
+// lm5k.spm_updateOrder convierte este parámetro con CONVERT(DATETIME, ..., 20)
+// (estilo ODBC canónico 'yyyy-mm-dd hh:mi:ss'); un ISO string con 'T'/'Z'/ms
+// truena con "out-of-range value" y tira todo el SP a la rama de fallback.
+function sqlCanonicalDateTime(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 async function getLatestPaymentStatusForOrder(pool, idOrden) {
   const columnsRes = await pool.request().query(`
     SELECT COLUMN_NAME
@@ -519,11 +527,13 @@ router.put('/:id', async (req, res, next) => {
         .input('MotivoStatus', sql.Int, safeMotivoStatus)
         .input('ExplicacionMotivo', sql.Int, safeExplicacionMotivo)
         .input('IdUsuario', sql.Int, idUsuario)
-        .input('CurrentDate', sql.NVarChar(50), new Date().toISOString())
+        .input('CurrentDate', sql.NVarChar(50), sqlCanonicalDateTime(new Date()))
         .input('IdOrden', sql.Int, idOrden)
-        .input('FechaReagenda', sql.NVarChar(50), fechaReagenda)
-        .input('Latitud', sql.NVarChar(50), latitud ? String(latitud) : null)
-        .input('Longitud', sql.NVarChar(50), longitud ? String(longitud) : null)
+        .input('FechaReagenda', sql.NVarChar(50), fechaReagenda ? `${fechaReagenda} 00:00:00` : fechaReagenda)
+        // lm5k.OrdenesReagenda.latitud/longitud son NOT NULL — el SP hace MERGE ahí en
+        // cada guardado, así que un null acá tumba el SP entero (ver comentario arriba).
+        .input('Latitud', sql.NVarChar(50), latitud ? String(latitud) : '0')
+        .input('Longitud', sql.NVarChar(50), longitud ? String(longitud) : '0')
         .input('Metros', sql.NVarChar(50), metros ? String(metros) : null)
         .input('Tiempo', sql.NVarChar(50), tiempo ? String(tiempo) : null)
         .query(`EXEC lm5k.spm_updateOrder @Status, @MotivoStatus, @ExplicacionMotivo,
