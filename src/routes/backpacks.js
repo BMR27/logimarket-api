@@ -33,6 +33,42 @@ async function getBlockingBackpacks(pool, idRepartidor, excludeBackpackId = null
   return result.recordset || [];
 }
 
+/**
+ * Regla: una orden que ya está dentro de una mochila activa (Asignada=1 o En
+ * Ruta=2) y aún pendiente de retorno/validación no puede asignarse a otra
+ * mochila — ni de otro mensajero, ni una segunda mochila del mismo.
+ */
+async function getOrdenesEnMochilaActiva(pool, orderIds) {
+  if (!orderIds || orderIds.length === 0) return [];
+  const request = pool.request();
+  const placeholders = orderIds.map((id, i) => {
+    request.input(`ordId${i}`, sql.Int, Number(id));
+    return `@ordId${i}`;
+  });
+
+  const result = await request.query(`
+    SELECT
+      cb.IdOrdenVenta AS idOrden,
+      ov.folioOrdenCliente,
+      b.Id AS idBackpack,
+      b.State AS backpackState,
+      ISNULL(mu.nombres + ' ' + mu.apellidoPaterno, 'Sin asignar') AS mensajero
+    FROM lm5k.tb_contenido_backpacks cb WITH (NOLOCK)
+    INNER JOIN lm5k.tb_backpacks b WITH (NOLOCK)
+      ON b.Id = cb.IdBackPack AND ISNULL(b.Deleted, 0) = 0
+    INNER JOIN lm5k.OrdenesVenta ov WITH (NOLOCK)
+      ON ov.id = cb.IdOrdenVenta
+    LEFT JOIN lm5k.Usuarios mu WITH (NOLOCK)
+      ON mu.id = b.IdRepartidor
+    WHERE cb.IdOrdenVenta IN (${placeholders.join(',')})
+      AND ISNULL(cb.Deleted, 0) = 0
+      AND ISNULL(cb.Validation, 0) <> 1
+      AND b.State IN (1, 2)
+  `);
+
+  return result.recordset || [];
+}
+
 async function getTableColumnsMap(pool, tableName) {
   const result = await pool.request()
     .input('TableName', sql.NVarChar(128), tableName)
@@ -364,6 +400,17 @@ router.post('/', async (req, res, next) => {
         return res.status(409).json({
           error: `No se pueden asignar órdenes en estatus Exitosa, Depositada o Pagada: ${blocked}`,
           code: 'ORDENES_NO_ASIGNABLES',
+        });
+      }
+
+      const enMochilaActiva = await getOrdenesEnMochilaActiva(pool, orderIdList);
+      if (enMochilaActiva.length > 0) {
+        const detalle = enMochilaActiva
+          .map((o) => `${o.folioOrdenCliente || o.idOrden} (mochila #${o.idBackpack} de ${o.mensajero})`)
+          .join(', ');
+        return res.status(409).json({
+          error: `No se pueden asignar órdenes que ya están en una mochila activa: ${detalle}`,
+          code: 'ORDEN_EN_MOCHILA_ACTIVA',
         });
       }
     }
