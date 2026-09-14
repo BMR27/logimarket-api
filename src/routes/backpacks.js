@@ -855,3 +855,4 @@ router.put('/items/:id/validate', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.closeActiveTripsForBackpack = closeActiveTripsForBackpack;

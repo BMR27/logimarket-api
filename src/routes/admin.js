@@ -7,13 +7,15 @@ const {
   markPaymentFailed,
   savePaymentEvent,
 } = require('../services/payments');
+const { closeActiveTripsForBackpack } = require('./backpacks');
 
 const router = express.Router();
 
 /**
  * POST /api/admin/reset
  * Cancela todas las mochilas activas (State 1 o 2) y
- * resetea las órdenes asignadas a ellas de vuelta a idStatus=1 (disponibles).
+ * resetea las órdenes asignadas a ellas de vuelta a idStatus=3 (Sin Asignar).
+ * No toca órdenes ya cerradas (Exitosa=1, Cancelada=4, Depositada=10, Pagada=11).
  * Solo accesible por usuarios con type 'admin' o 'lider'.
  */
 router.post('/reset', async (req, res, next) => {
@@ -40,24 +42,36 @@ router.post('/reset', async (req, res, next) => {
           SET State = 4
           WHERE Id IN (SELECT Id FROM @ActiveBackpacks)
 
-        -- Resetear las órdenes de esas mochilas a disponible (idStatus=1)
+        -- Resetear a "Sin Asignar" (idStatus=3) solo las órdenes que aún no
+        -- están cerradas; nunca degradar Exitosa/Cancelada/Depositada/Pagada.
         DECLARE @orderCount INT
         UPDATE lm5k.OrdenesVenta
-          SET idStatus = 1, idMotivoStatus = NULL
+          SET idStatus = 3, idMotivoStatus = NULL
           WHERE id IN (
             SELECT cb.IdOrdenVenta
             FROM lm5k.tb_contenido_backpacks cb
             WHERE cb.IdBackPack IN (SELECT Id FROM @ActiveBackpacks)
               AND cb.Deleted = 0
           )
+          AND idStatus NOT IN (1, 4, 10, 11)
         SET @orderCount = @@ROWCOUNT
 
       COMMIT
 
-      SELECT @backpackCount AS backpacksCancelled, @orderCount AS ordersReset
+      SELECT @backpackCount AS backpacksCancelled, @orderCount AS ordersReset;
+      SELECT Id FROM @ActiveBackpacks;
     `);
 
-    const row = result.recordset[0];
+    const row = result.recordsets[0][0];
+    const cancelledBackpackIds = result.recordsets[1].map((r) => r.Id);
+
+    // Limpiar el estado de "viaje activo" (tb_mensajero_ubicacion) de cada
+    // mensajero cuya mochila fue cancelada, para que su celular no se quede
+    // con un viaje fantasma sobre una orden que ya no está en su mochila.
+    for (const idBackpack of cancelledBackpackIds) {
+      await closeActiveTripsForBackpack(pool, idBackpack);
+    }
+
     res.json({
       success: true,
       backpacksCancelled: row.backpacksCancelled,
