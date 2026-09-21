@@ -549,12 +549,17 @@ router.get('/:id/items', async (req, res, next) => {
     // Fuerza Validation desde tabla base para evitar desalineacion con SP.
     if (items.length > 0) {
       try {
+        // MAX + GROUP BY: si por cualquier motivo hay más de una fila Deleted=0 para
+        // la misma orden en esta mochila, sin esto el orden de retorno de SQL Server
+        // (no determinístico sin ORDER BY) decidía al azar si se veía validada o no
+        // en la siguiente carga — mismo criterio que ya usa /deliver/:idRepartidor/items.
         const validationResult = await pool.request()
           .input('IdBackpack', sql.Int, idBackpack)
           .query(`
-            SELECT IdOrdenVenta, ISNULL(Validation, 0) AS Validation
+            SELECT IdOrdenVenta, MAX(ISNULL(Validation, 0)) AS Validation
             FROM lm5k.tb_contenido_backpacks
             WHERE IdBackPack = @IdBackpack AND Deleted = 0
+            GROUP BY IdOrdenVenta
           `);
 
         const byOrder = new Map();
