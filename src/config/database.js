@@ -11,7 +11,14 @@ const dbConfig = {
     trustServerCertificate: true,
   },
   pool: {
-    max: 10,
+    // 10 se saturaba con la carga real: cada mensajero activo manda su ubicación cada
+    // 10s (location_tracking_service) y la pantalla de pagos hace polling cada 5s, y
+    // cada request autenticado ya gasta una conexión solo para validar la sesión
+    // (middleware/auth.js). Bajo esa carga, requests como "validar orden" quedaban en
+    // cola esperando una conexión libre y el cliente Flutter (timeout de 20s) cerraba
+    // el socket antes de que el servidor alcanzara a atenderla — eso es lo que se veía
+    // como "request aborted" en el log y "la app no deja calificar" en el celular.
+    max: 30,
     min: 0,
     idleTimeoutMillis: 30000,
   },

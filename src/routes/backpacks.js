@@ -755,9 +755,6 @@ router.put('/:id/items/validate-folio', async (req, res, next) => {
 router.put('/items/:id/validate', async (req, res, next) => {
   try {
     const idOrFolio = req.params.id;
-    console.log('[VALIDATE] ===== INICIO VALIDACIÓN =====');
-    console.log('[VALIDATE] ID/Folio recibido:', idOrFolio);
-    
     if (!idOrFolio || idOrFolio.trim() === '') {
       return res.status(400).json({ error: 'ID o Folio requerido' });
     }
@@ -765,96 +762,52 @@ router.put('/items/:id/validate', async (req, res, next) => {
     const pool = await getPool();
     const idItem = parseInt(idOrFolio, 10);
     const isNumericId = !isNaN(idItem) && idItem > 0;
+    const schemaInfo = await getSchemaInfo(pool);
 
-    console.log('[VALIDATE] ¿Es ID numérico?:', isNumericId);
+    // Antes esto probaba hasta 3 UPDATEs secuenciales (IdBackpackItem, luego
+    // IdOrdenVenta, luego FolioOrden), cada uno una request de ida y vuelta al pool
+    // de SQL Server. Bajo la carga real de la app (polling de ubicación/pagos
+    // saturando el pool compartido), esos round-trips extra hacían que "validar"
+    // se sintiera lento o se quedara colgado. Un solo UPDATE con los mismos
+    // criterios en OR resuelve el caso típico en una sola conexión.
+    const idColumnClause = schemaInfo.backpackItemIdColumn
+      ? `[${schemaInfo.backpackItemIdColumn}] = @IdItem OR `
+      : '';
+    const updateResult = await pool.request()
+      .input('IdItem', sql.Int, isNumericId ? idItem : null)
+      .input('Folio', sql.NVarChar(50), idOrFolio.trim())
+      .input('Validation', sql.Int, 1)
+      .query(`
+        UPDATE lm5k.tb_contenido_backpacks
+        SET Validation = @Validation
+        WHERE ${idColumnClause}IdOrdenVenta = @IdItem
+           OR FolioOrden = @Folio
+           OR IdOrdenVenta = (SELECT id FROM lm5k.OrdenesVenta WHERE folioOrdenCliente = @Folio)
+      `);
 
-    // INTENTO 1: Si es numérico, busca por IdBackpackItem
-    if (isNumericId) {
-      try {
-        const schemaInfo = await getSchemaInfo(pool);
-        if (!schemaInfo.backpackItemIdColumn) {
-          console.log('[VALIDATE] INTENTO 1 OMITIDO: no existe columna IdBackpackItem/IdBackPackItem');
-        } else {
-          console.log('[VALIDATE] INTENTO 1: UPDATE por', schemaInfo.backpackItemIdColumn, '=', idItem);
-
-          const updateResult = await pool.request()
-            .input('IdBackpackItem', sql.Int, idItem)
-            .input('Validation', sql.Int, 1)
-            .query(`UPDATE lm5k.tb_contenido_backpacks SET Validation = @Validation WHERE [${schemaInfo.backpackItemIdColumn}] = @IdBackpackItem`);
-
-          if (updateResult.rowsAffected[0] > 0) {
-            console.log('[VALIDATE] ✓ INTENTO 1 EXITOSO');
-            return res.json({ success: true, method: schemaInfo.backpackItemIdColumn });
-          }
-          console.log('[VALIDATE] ✗ INTENTO 1: 0 filas afectadas');
-        }
-      } catch (err1) {
-        console.log('[VALIDATE] ✗ INTENTO 1 ERROR:', err1.message);
-      }
-
-      // INTENTO 2: Si es numérico, busca por IdOrdenVenta
-      try {
-        console.log('[VALIDATE] INTENTO 2: UPDATE por IdOrdenVenta =', idItem);
-        
-        const updateResult = await pool.request()
-          .input('IdOrdenVenta', sql.Int, idItem)
-          .input('Validation', sql.Int, 1)
-          .query(`UPDATE lm5k.tb_contenido_backpacks SET Validation = @Validation WHERE IdOrdenVenta = @IdOrdenVenta`);
-        
-        if (updateResult.rowsAffected[0] > 0) {
-          console.log('[VALIDATE] ✓ INTENTO 2 EXITOSO');
-          return res.json({ success: true, method: 'IdOrdenVenta' });
-        }
-        console.log('[VALIDATE] ✗ INTENTO 2: 0 filas afectadas');
-      } catch (err2) {
-        console.log('[VALIDATE] ✗ INTENTO 2 ERROR:', err2.message);
-      }
+    if (updateResult.rowsAffected[0] > 0) {
+      return res.json({ success: true, method: 'combined' });
     }
 
-    // INTENTO 3: Buscar por FolioOrden (string) - ESTE ES EL MÁS PROBABLE
+    // Fallback: tabla legacy alterna, solo si nada matcheó en tb_contenido_backpacks.
     try {
-      console.log('[VALIDATE] INTENTO 3: UPDATE por FolioOrden =', idOrFolio);
-      
-      const updateResult = await pool.request()
-        .input('Folio', sql.NVarChar(50), idOrFolio.trim())
-        .input('Validation', sql.Int, 1)
-        .query(`UPDATE lm5k.tb_contenido_backpacks SET Validation = @Validation WHERE FolioOrden = @Folio OR IdOrdenVenta = (SELECT id FROM lm5k.OrdenesVenta WHERE folioOrdenCliente = @Folio)`);
-      
-      console.log('[VALIDATE] Filas afectadas:', updateResult.rowsAffected[0]);
-      
-      if (updateResult.rowsAffected[0] > 0) {
-        console.log('[VALIDATE] ✓ INTENTO 3 EXITOSO por FolioOrden');
-        return res.json({ success: true, method: 'FolioOrden' });
-      }
-      console.log('[VALIDATE] ✗ INTENTO 3: 0 filas afectadas');
-    } catch (err3) {
-      console.log('[VALIDATE] ✗ INTENTO 3 ERROR:', err3.message);
-    }
-
-    // INTENTO 4: Buscar en tabla alternativa
-    try {
-      console.log('[VALIDATE] INTENTO 4: UPDATE contenido_mochilas');
-      
       const altResult = await pool.request()
-        .input('IdContenido', sql.Int, idItem)
+        .input('IdContenido', sql.Int, isNumericId ? idItem : -1)
         .query(`UPDATE lm5k.contenido_mochilas SET Validacion = 1, FechaValidacion = GETDATE() WHERE IdContenidoMochila = @IdContenido`);
-      
+
       if (altResult.rowsAffected[0] > 0) {
-        console.log('[VALIDATE] ✓ INTENTO 4 EXITOSO');
         return res.json({ success: true, method: 'contenido_mochilas' });
       }
     } catch (err4) {
-      console.log('[VALIDATE] ✗ INTENTO 4 ERROR:', err4.message);
+      console.log('[VALIDATE] contenido_mochilas fallback error:', err4.message);
     }
 
-    console.log('[VALIDATE] ✗ FALLO: No se pudo validar. Item:', idOrFolio);
-    return res.status(404).json({ 
+    return res.status(404).json({
       error: 'Item no encontrado en BD. Verifica el folio.',
-      sent: idOrFolio
+      sent: idOrFolio,
     });
-    
   } catch (err) {
-    console.error('[VALIDATE] ERROR FATAL:', err.message);
+    console.error('[VALIDATE] ERROR:', err.message);
     next(err);
   }
 });
