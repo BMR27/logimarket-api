@@ -1,8 +1,24 @@
 const express = require('express');
 const { getPool, sql } = require('../config/database');
 const { enrichOrdenesConComision, calcularComisionesOrdenes } = require('../services/comisiones.service');
+const {
+  aplicarCoordenadas,
+  obtenerCoordenadasSeguras,
+  guardarCoordenada,
+  isWithinMexico,
+} = require('../services/geocodificacion.service');
 
 const router = express.Router();
+
+// Comisión y coordenadas guardadas se consultan en paralelo: agregar el punto
+// del mapa no debe sumar tiempo a la carga de órdenes del mensajero.
+async function enrichOrdenes(pool, rows) {
+  const [enriched, coords] = await Promise.all([
+    enrichOrdenesConComision(pool, rows),
+    obtenerCoordenadasSeguras(pool, rows.map((r) => r?.id ?? r?.Id)),
+  ]);
+  return aplicarCoordenadas(enriched, coords);
+}
 
 let statusHistoryTableReadyPromise = null;
 let priceChangeRequestsTableReadyPromise = null;
@@ -132,7 +148,7 @@ router.get('/', async (req, res, next) => {
       .input('equipos', sql.NVarChar(500), equipos)
       .input('folio', sql.NVarChar(100), folio)
       .query('EXEC lm5k.spm_getOrdenesVenta_debug @equipos, @folio');
-    const enriched = await enrichOrdenesConComision(pool, result.recordset);
+    const enriched = await enrichOrdenes(pool, result.recordset);
     res.json(enriched);
   } catch (err) {
     next(err);
@@ -153,7 +169,7 @@ router.get('/paginated', async (req, res, next) => {
       .input('folio', sql.NVarChar(100), folio)
       .input('lastId', sql.Int, parseInt(lastId, 10))
       .query('EXEC lm5k.spm_getOrdenVenta @equipos, @folio, @lastId');
-    const enriched = await enrichOrdenesConComision(pool, result.recordset);
+    const enriched = await enrichOrdenes(pool, result.recordset);
     res.json(enriched);
   } catch (err) {
     next(err);
@@ -173,7 +189,7 @@ router.get('/ways', async (req, res, next) => {
       .input('equipos', sql.NVarChar(500), equipos)
       .input('folio', sql.NVarChar(100), folio)
       .query('EXEC lm5k.spm_getOrdenVentaForWays @equipos, @folio');
-    const enriched = await enrichOrdenesConComision(pool, result.recordset);
+    const enriched = await enrichOrdenes(pool, result.recordset);
     res.json(enriched);
   } catch (err) {
     next(err);
@@ -191,20 +207,54 @@ router.get('/:id/address', async (req, res, next) => {
     if (isNaN(id) || id <= 0) return res.status(400).json({ error: 'ID inválido' });
 
     const pool = await getPool();
-    const result = await pool.request()
-      .input('Id', sql.Int, id)
-      .query(`
-        SELECT id, folioOrdenCliente,
-               calle, numExterior, numInterior, colonia,
-               municipioDelegacion, estado, codigoPostal
-        FROM lm5k.OrdenesVenta
-        WHERE id = @Id AND ISNULL(deleted, 0) = 0
-      `);
+    const [result, coords] = await Promise.all([
+      pool.request()
+        .input('Id', sql.Int, id)
+        .query(`
+          SELECT id, folioOrdenCliente,
+                 calle, numExterior, numInterior, colonia,
+                 municipioDelegacion, estado, codigoPostal
+          FROM lm5k.OrdenesVenta
+          WHERE id = @Id AND ISNULL(deleted, 0) = 0
+        `),
+      obtenerCoordenadasSeguras(pool, [id]),
+    ]);
 
     if (!result.recordset.length) {
       return res.status(404).json({ error: 'Orden no encontrada' });
     }
-    res.json(result.recordset[0]);
+    res.json(aplicarCoordenadas(result.recordset, coords)[0]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * PUT /api/orders/:id/geocode
+ * Body: { latitud, longitud, precision: 'direccion' | 'cp' }
+ * La app manda el punto que ya validó contra el CP para que no se vuelva a
+ * geocodificar en otros celulares ni en otras sesiones.
+ */
+router.put('/:id/geocode', async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const latitud = Number(req.body?.latitud);
+    const longitud = Number(req.body?.longitud);
+    const precision = req.body?.precision === 'cp' ? 'cp' : 'direccion';
+    if (isNaN(id) || id <= 0) return res.status(400).json({ error: 'ID inválido' });
+    if (!Number.isFinite(latitud) || !Number.isFinite(longitud) || !isWithinMexico(latitud, longitud)) {
+      return res.status(400).json({ error: 'Coordenadas inválidas' });
+    }
+
+    const pool = await getPool();
+    const ok = await guardarCoordenada(pool, id, {
+      latitud,
+      longitud,
+      precision,
+      idUsuario: Number(req.user?.idUsuario) || null,
+    });
+    if (!ok) return res.status(404).json({ error: 'Orden no encontrada' });
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
@@ -222,6 +272,8 @@ router.get('/:id', async (req, res, next) => {
     if (isNaN(id)) return res.status(400).json({ error: 'ID inválido' });
 
     const pool = await getPool();
+    // Se lanza en paralelo con el SP; se aplica al final sin agregar espera.
+    const coordsPromise = obtenerCoordenadasSeguras(pool, [id]);
     const result = await pool.request()
       .input('equipos', sql.NVarChar(500), equipos)
       .input('Id', sql.Int, id)
@@ -354,7 +406,7 @@ router.get('/:id', async (req, res, next) => {
       const withMotivo = await enrichMotivoFromOrdenVenta(result.recordset[0]);
       const withFecha = await enrichFechaReagendaFromOrdenVenta(withMotivo);
       const enriched = await enrichComisionFromOrdenVenta(withFecha);
-      return res.json(enriched);
+      return res.json(aplicarCoordenadas([enriched], await coordsPromise)[0]);
     }
 
     const optionalOrderColumnsRes = await pool.request().query(`
@@ -420,7 +472,7 @@ router.get('/:id', async (req, res, next) => {
     const withMotivoFallback = await enrichMotivoFromOrdenVenta(fallback.recordset[0]);
     const withFechaFallback = await enrichFechaReagendaFromOrdenVenta(withMotivoFallback);
     const enrichedFallback = await enrichComisionFromOrdenVenta(withFechaFallback);
-    res.json(enrichedFallback);
+    res.json(aplicarCoordenadas([enrichedFallback], await coordsPromise)[0]);
   } catch (err) {
     next(err);
   }

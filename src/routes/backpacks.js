@@ -1,5 +1,6 @@
 const express = require('express');
 const { getPool, sql } = require('../config/database');
+const { aplicarCoordenadas, obtenerCoordenadasSeguras } = require('../services/geocodificacion.service');
 
 const router = express.Router();
 
@@ -239,8 +240,12 @@ async function enrichItemsWithOrderData(pool, items) {
     selectCols.push(`[${schemaInfo.orderCodigoPostalColumn}] AS CodigoPostal`);
   }
 
-  const coordsResult = await pool.request()
-    .query(`SELECT ${selectCols.join(', ')} FROM lm5k.OrdenesVenta WHERE id IN (${ids})`);
+  // Los puntos ya validados se consultan en paralelo para no sumar espera.
+  const [coordsResult, savedCoords] = await Promise.all([
+    pool.request()
+      .query(`SELECT ${selectCols.join(', ')} FROM lm5k.OrdenesVenta WHERE id IN (${ids})`),
+    obtenerCoordenadasSeguras(pool, ids.split(',')),
+  ]);
 
   const coordMap = {};
   for (const row of coordsResult.recordset || []) {
@@ -268,6 +273,12 @@ async function enrichItemsWithOrderData(pool, items) {
     item.Estado = d?.estado ?? null;
     item.CodigoPostal = d?.codigoPostal ?? null;
   }
+
+  aplicarCoordenadas(items, savedCoords, {
+    idKey: (item) => item.IdOrdenVenta || item.idOrdenVenta,
+    latKey: 'Latitud',
+    lngKey: 'Longitud',
+  });
 }
 
 async function closeActiveTripsForBackpack(pool, idBackpack) {
