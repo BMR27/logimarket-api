@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const authRoutes = require('./routes/auth');
 const equiposRoutes = require('./routes/equipos');
 const ordersRoutes = require('./routes/orders');
+const ordersBatchRoutes = require('./routes/ordersBatch');
 const paymentsRoutes = require('./routes/payments');
 const productsRoutes = require('./routes/products');
 const searchRoutes = require('./routes/search');
@@ -95,6 +96,8 @@ app.use('/api/mock/payments', mockPaymentsRoutes);
 app.use('/pay', payCheckoutRoutes);
 
 // Rutas protegidas (requieren JWT)
+// Antes que los demás routers de /api/orders para que '/batch' no se tome como un :id
+app.use('/api/orders/batch', authenticate, ordersBatchRoutes);
 app.use('/api/orders', authenticate, paymentsRoutes);
 app.use('/api/equipos', authenticate, equiposRoutes);
 app.use('/api/orders', authenticate, ordersRoutes);
