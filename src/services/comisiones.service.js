@@ -6,6 +6,13 @@ const { sql } = require('../config/database');
 // tarifa por tipo de cobertura del tabulador (comisionLocal/Extendida/Remota) >
 // comisionFija como fallback. Es el monto que realmente gana el equipo/mensajero por
 // la orden — no el total que paga el cliente.
+// Excepción: en los equipos de EQUIPOS_CON_COMISION_MENSAJERO, si el mensajero de la
+// orden tiene comisión especial para ese tipo de cobertura (lm5k.ComisionMensajero,
+// pantalla "Comisión Mensajero"), la app muestra esa, aunque sea 0. No cambia lo que
+// calcula Corte Equipo. Solo en esos equipos: en otros (ej. Mérida) la tabla ya tiene
+// filas que no deben cambiar lo que ve el mensajero.
+const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10]); // 10 = Guadalajara - Perez
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -51,12 +58,15 @@ async function calcularComisionesOrdenes(pool, ordenes) {
     )
     SELECT
       o.id,
+      o.idEquipo,
       o.total,
       ISNULL(cob.cobertura, 'sin cobertura') AS cobertura,
       cob.comisionEquipo,
-      t.comisionFija, t.comisionLocal, t.comisionExtendida, t.comisionRemota
+      t.comisionFija, t.comisionLocal, t.comisionExtendida, t.comisionRemota,
+      cm.comision AS comisionMensajero
     FROM Ordenes o
     LEFT JOIN TabPorEquipo t ON t.idEquipo = o.idEquipo AND t.rn = 1
+    LEFT JOIN lm5k.OrdenesVenta ov ON ov.id = o.id
     OUTER APPLY (
       SELECT TOP 1
         COALESCE(tco.cobertura, tc.cobertura) AS cobertura,
@@ -76,6 +86,14 @@ async function calcularComisionesOrdenes(pool, ordenes) {
         AND ce.idCodigoPostal IS NULL
         AND ISNULL(ce.deleted, 0) = 0
     ) cob
+    OUTER APPLY (
+      SELECT TOP 1 cmx.comision
+      FROM lm5k.ComisionMensajero cmx
+      INNER JOIN lm5k.TiposCobertura tcm ON tcm.id = cmx.idTipoCobertura
+      WHERE cmx.idUsuario = ov.idMensajero AND ISNULL(cmx.deleted, 0) = 0
+        AND LOWER(tcm.cobertura) = LOWER(ISNULL(cob.cobertura, ''))
+      ORDER BY cmx.id DESC
+    ) cm
   `;
 
   const dbResult = await request.query(query);
@@ -84,7 +102,8 @@ async function calcularComisionesOrdenes(pool, ordenes) {
     const comEquipo = row.comisionEquipo != null ? Number(row.comisionEquipo) : null;
     const comisionFija = Number(row.comisionFija ?? 0);
     let comision;
-    if (comEquipo != null && comEquipo > 0) comision = comEquipo;
+    if (row.comisionMensajero != null && EQUIPOS_CON_COMISION_MENSAJERO.has(Number(row.idEquipo))) comision = Number(row.comisionMensajero);
+    else if (comEquipo != null && comEquipo > 0) comision = comEquipo;
     else if (cob === 'base' && row.comisionLocal != null) comision = Number(row.comisionLocal);
     else if (cob === 'extendida' && row.comisionExtendida != null) comision = Number(row.comisionExtendida);
     else if (cob === 'foranea' && row.comisionRemota != null) comision = Number(row.comisionRemota);
