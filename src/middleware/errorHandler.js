@@ -10,6 +10,11 @@ function errorHandler(err, req, res, next) {
     return;
   }
 
+  // Errores esperados con estado propio (p. ej. 503 si falta configuración): se responden tal cual
+  if (Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 && err.status !== 500) {
+    return res.status(err.status).json({ error: msg });
+  }
+
   console.error('Error:', msg, err?.stack);
   // detail incluido temporalmente para diagnóstico — remover después
   res.status(500).json({ error: 'Error interno del servidor', detail: msg });

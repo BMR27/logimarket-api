@@ -16,6 +16,7 @@ const catalogsRoutes = require('./routes/catalogs');
 const validacionRoutes = require('./routes/validacion');
 const adminRoutes = require('./routes/admin');
 const ubicacionRoutes = require('./routes/ubicacion');
+const geoRoutes = require('./routes/geo');
 const publicPaymentsRoutes = require('./routes/publicPayments');
 const mockPaymentsRoutes = require('./routes/mockPayments');
 const payCheckoutRoutes = require('./routes/payCheckout');
@@ -107,6 +108,7 @@ app.use('/api/backpacks', authenticate, backpacksRoutes);
 app.use('/api/catalogs', authenticate, catalogsRoutes);
 app.use('/api/validacion', authenticate, validacionRoutes);
 app.use('/api/admin', authenticate, adminRoutes);
+app.use('/api/geo', authenticate, geoRoutes);
 // Ubicación en tiempo real: se expone sin auth para permitir polling del dashboard web.
 app.use('/api/ubicacion', ubicacionRoutes);
 

@@ -6,6 +6,10 @@ const {
   obtenerCoordenadasSeguras,
   guardarCoordenada,
   isWithinMexico,
+  resolverCoordenadas,
+  coordenadaDeOrden,
+  centroCp,
+  distanciaKm,
 } = require('../services/geocodificacion.service');
 
 const router = express.Router();
@@ -230,6 +234,24 @@ router.get('/:id/address', async (req, res, next) => {
 });
 
 /**
+ * POST /api/orders/geocode/batch
+ * Body: { ids: number[] }
+ * Puntos del mapa para un conjunto de órdenes (la mochila del mensajero). Devuelve los
+ * ya guardados y geocodifica en el servidor (Google, validado contra el CP) los que
+ * falten; los que no alcancen en esta llamada vienen en `pendientes` para pedirlos después.
+ */
+router.post('/geocode/batch', async (req, res, next) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    if (!ids.length) return res.json({ coords: {}, pendientes: [] });
+    const pool = await getPool();
+    res.json(await resolverCoordenadas(pool, ids));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * PUT /api/orders/:id/geocode
  * Body: { latitud, longitud, precision: 'direccion' | 'cp' }
  * La app manda el punto que ya validó contra el CP para que no se vuelva a
@@ -240,7 +262,9 @@ router.put('/:id/geocode', async (req, res, next) => {
     const id = parseInt(req.params.id, 10);
     const latitud = Number(req.body?.latitud);
     const longitud = Number(req.body?.longitud);
-    const precision = req.body?.precision === 'cp' ? 'cp' : 'direccion';
+    // 'manual' = el mensajero movió el pin a mano (siempre gana). Las versiones
+    // anteriores de la app solo mandan 'cp' o 'direccion'.
+    const precision = ['cp', 'direccion', 'manual'].includes(req.body?.precision) ? req.body.precision : 'direccion';
     if (isNaN(id) || id <= 0) return res.status(400).json({ error: 'ID inválido' });
     if (!Number.isFinite(latitud) || !Number.isFinite(longitud) || !isWithinMexico(latitud, longitud)) {
       return res.status(400).json({ error: 'Coordenadas inválidas' });
@@ -251,7 +275,10 @@ router.put('/:id/geocode', async (req, res, next) => {
       latitud,
       longitud,
       precision,
+      fuente: precision === 'manual' ? 'manual' : 'app',
       idUsuario: Number(req.user?.idUsuario) || null,
+      direccionFormateada: req.body?.direccion || null,
+      placeId: req.body?.placeId || null,
     });
     if (!ok) return res.status(404).json({ error: 'Orden no encontrada' });
     res.json({ ok: true });
@@ -734,11 +761,35 @@ router.put('/:id', async (req, res, next) => {
       }
     }
 
+    // Entrega exitosa: el GPS del mensajero en la puerta es el mejor punto de esa
+    // dirección para la próxima vez. Solo si es razonable (cerca del punto actual o del
+    // CP) para no guardar un GPS malo; nunca pisa un pin corregido a mano. No bloquea.
+    if (safeStatus === 1 && currentStatus !== 1) {
+      guardarPuntoDeEntrega(pool, idOrden, Number(latitud), Number(longitud), Number(idUsuario) || null)
+        .catch((e) => console.warn('[entrega-gps] orden', idOrden, e?.message));
+    }
+
     res.json({ success: true });
   } catch (err) {
     next(err);
   }
 });
+
+async function guardarPuntoDeEntrega(pool, idOrden, lat, lng, idUsuario) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isWithinMexico(lat, lng)) return;
+  const actual = await coordenadaDeOrden(pool, idOrden);
+  if (actual?.precision === 'manual') return;
+  const aqui = { lat, lng };
+  let razonable = actual ? distanciaKm({ lat: actual.latitud, lng: actual.longitud }, aqui) <= 1.5 : false;
+  if (!razonable) {
+    const r = await pool.request().input('id', sql.Int, idOrden)
+      .query('SELECT codigoPostal FROM lm5k.OrdenesVenta WITH (NOLOCK) WHERE id = @id');
+    const ancla = await centroCp(pool, r.recordset?.[0]?.codigoPostal);
+    razonable = ancla ? distanciaKm(ancla, aqui) <= 5 : false;
+  }
+  if (!razonable) return;
+  await guardarCoordenada(pool, idOrden, { latitud: lat, longitud: lng, precision: 'entrega', fuente: 'entrega', idUsuario });
+}
 
 /**
  * PUT /api/orders/:id/notes
