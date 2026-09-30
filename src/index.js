@@ -19,6 +19,7 @@ const ubicacionRoutes = require('./routes/ubicacion');
 const geoRoutes = require('./routes/geo');
 const { getPool } = require('./config/database');
 const { iniciarGeocodificacionPendientes } = require('./services/geocodificacion.service');
+const { iniciarLimpiezaHistorialUbicacion } = require('./services/ubicacionMantenimiento.service');
 const publicPaymentsRoutes = require('./routes/publicPayments');
 const mockPaymentsRoutes = require('./routes/mockPayments');
 const payCheckoutRoutes = require('./routes/payCheckout');
@@ -123,6 +124,8 @@ const server = app.listen(PORT, () => {
 
 // Con HERE_API_KEY: geocodifica en segundo plano las órdenes activas sin punto.
 iniciarGeocodificacionPendientes(getPool);
+// Borra puntos GPS de más de 90 días (RETENCION_UBICACION_DIAS).
+iniciarLimpiezaHistorialUbicacion(getPool);
 
 const shutdown = (signal) => {
   console.log(`${signal} recibido; cerrando Logimarket API de forma controlada`);
