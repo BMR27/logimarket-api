@@ -1,15 +1,22 @@
 const { sql } = require('../config/database');
+const { hereDisponible, geocodificarDireccion } = require('./here.service');
 
 // lm5k.OrdenesVenta no tiene latitud/longitud: la app geocodificaba cada orden en
 // cada celular y en cada sesión (lento y con costo en Google). Aquí se guarda el
-// punto ya validado contra el CP para que se calcule una sola vez.
+// punto para que se calcule una sola vez.
 //
 // huellaDireccion es un hash de los campos de dirección al momento de guardar;
 // si alguien edita la dirección de la orden, la huella ya no coincide, el punto
-// se ignora y la app vuelve a geocodificar y a guardar.
+// se ignora y se vuelve a geocodificar.
 //
-// precision: 'direccion' = se encontró la calle/colonia dentro del CP;
-//            'cp'        = sin coincidencia confiable, se usó el centro del CP.
+// Con HERE_API_KEY, el servidor geocodifica con HERE (ver here.service.js):
+//   exacta | interpolada | calle | zona
+// Sin HERE, o si HERE no encuentra la dirección, la app geocodifica y manda:
+//   direccion = la app encontró la calle/colonia dentro del CP;
+//   cp        = sin coincidencia confiable, se usó el centro del CP.
+
+// Niveles calculados por HERE en el servidor: un punto de la app no los pisa.
+const PRECISIONES_HERE = ['exacta', 'interpolada', 'calle', 'zona'];
 
 let tableReadyPromise = null;
 
@@ -90,18 +97,145 @@ function tieneCoordenada(value) {
   return Number.isFinite(n) && n !== 0 && String(value ?? '').trim() !== '';
 }
 
+// Órdenes que HERE no pudo resolver: no se reintentan en cada request (la app las
+// resuelve con sus respaldos). Se olvidan pasado un rato por si fue un error de red.
+const FALLOS_HERE_TTL_MS = 6 * 60 * 60 * 1000;
+const fallosHere = new Map();
+// Mismas órdenes pedidas por varios requests a la vez: una sola consulta a HERE.
+const enCurso = new Map();
+
+function falloReciente(idOrden) {
+  const t = fallosHere.get(idOrden);
+  if (t && Date.now() - t < FALLOS_HERE_TTL_MS) return true;
+  if (t) fallosHere.delete(idOrden);
+  return false;
+}
+
+async function direccionesDeOrdenes(pool, ids) {
+  const res = await pool.request().query(`
+    SELECT id, calle, numExterior, colonia, codigoPostal, municipioDelegacion, estado
+    FROM lm5k.OrdenesVenta WITH (NOLOCK)
+    WHERE id IN (${ids.join(',')}) AND ISNULL(deleted, 0) = 0
+  `);
+  return res.recordset || [];
+}
+
+/** Geocodifica una orden con HERE y guarda el punto. null si no se pudo. */
+function geocodificarYGuardar(pool, orden) {
+  const id = Number(orden.id);
+  if (enCurso.has(id)) return enCurso.get(id);
+  const p = (async () => {
+    try {
+      const punto = await geocodificarDireccion(orden);
+      if (!punto || !isWithinMexico(punto.latitud, punto.longitud)) {
+        fallosHere.set(id, Date.now());
+        return null;
+      }
+      await guardarCoordenada(pool, id, { ...punto, idUsuario: null });
+      return punto;
+    } catch (err) {
+      fallosHere.set(id, Date.now());
+      console.error(`[geocodificacion] HERE falló para la orden ${id}:`, err?.message);
+      return null;
+    } finally {
+      enCurso.delete(id);
+    }
+  })();
+  enCurso.set(id, p);
+  return p;
+}
+
+// Corre `fn` sobre `items` con a lo más `limite` en paralelo.
+async function enParalelo(items, limite, fn) {
+  let i = 0;
+  const trabajadores = Array.from({ length: Math.min(limite, items.length) }, async () => {
+    while (i < items.length) {
+      const item = items[i++];
+      await fn(item);
+    }
+  });
+  await Promise.all(trabajadores);
+}
+
+// Tiempo máximo que un listado espera a HERE; lo que no termine se sigue
+// resolviendo en segundo plano y aparece en la siguiente carga.
+const ESPERA_MAX_LISTADO_MS = 2500;
+
 /**
  * Igual que obtenerCoordenadasGuardadas pero nunca lanza: si falla, la app
- * simplemente geocodifica como antes. Pensado para correr en paralelo con otras
- * consultas del listado sin sumar tiempo ni riesgo a la respuesta.
+ * simplemente geocodifica como antes. Con HERE configurado, las órdenes sin
+ * punto se geocodifican en el servidor (esperando a lo más ESPERA_MAX_LISTADO_MS).
  */
 async function obtenerCoordenadasSeguras(pool, ids) {
+  let coords;
   try {
-    return await obtenerCoordenadasGuardadas(pool, ids);
+    coords = await obtenerCoordenadasGuardadas(pool, ids);
   } catch (err) {
     console.error('[obtenerCoordenadasSeguras] error', err?.message);
     return new Map();
   }
+  if (!hereDisponible()) return coords;
+
+  try {
+    const faltantes = [...new Set((ids || []).map(Number))]
+      .filter((id) => Number.isInteger(id) && id > 0 && !coords.has(id) && !falloReciente(id));
+    if (!faltantes.length) return coords;
+
+    const ordenes = await direccionesDeOrdenes(pool, faltantes);
+    const trabajo = enParalelo(ordenes, 6, async (o) => {
+      const punto = await geocodificarYGuardar(pool, o);
+      if (punto) coords.set(Number(o.id), punto);
+    });
+    await Promise.race([trabajo, new Promise((r) => setTimeout(r, ESPERA_MAX_LISTADO_MS))]);
+    // Copia: lo que termine después ya no debe mutar el Map que usa la respuesta.
+    return new Map(coords);
+  } catch (err) {
+    console.error('[obtenerCoordenadasSeguras] HERE error', err?.message);
+    return coords;
+  }
+}
+
+/**
+ * Geocodifica en segundo plano las órdenes activas (por asignar, asignadas,
+ * en intento o en ruta) que aún no tienen punto, para que el mensajero ya las
+ * vea en el mapa al abrir la app. Solo corre con HERE_API_KEY.
+ */
+function iniciarGeocodificacionPendientes(getPool, { cadaMs = 60000, lote = 40 } = {}) {
+  if (!hereDisponible() || process.env.GEOCODIFICAR_PENDIENTES === '0') return null;
+  let corriendo = false;
+  const tick = async () => {
+    if (corriendo) return;
+    corriendo = true;
+    try {
+      const pool = await getPool();
+      await ensureGeocodificacionTable(pool);
+      // Ventana por id (índice clustered) para no recorrer toda la tabla de órdenes.
+      const res = await pool.request().input('Lote', sql.Int, lote).query(`
+        DECLARE @Desde INT = (SELECT MAX(id) FROM lm5k.OrdenesVenta) - 200000;
+        SELECT TOP (@Lote) ov.id, ov.calle, ov.numExterior, ov.colonia, ov.codigoPostal,
+               ov.municipioDelegacion, ov.estado
+        FROM lm5k.OrdenesVenta ov WITH (NOLOCK)
+        LEFT JOIN lm5k.OrdenesVentaGeocodificacion g WITH (NOLOCK) ON g.idOrden = ov.id
+        WHERE ov.id > @Desde
+          AND ISNULL(ov.deleted, 0) = 0
+          AND ov.idStatus IN (2, 3, 5, 6, 7)
+          AND LEN(LTRIM(ISNULL(ov.codigoPostal, ''))) = 5
+          AND (g.idOrden IS NULL OR g.huellaDireccion <> ${huellaDireccionSql('ov')})
+        ORDER BY ov.id DESC
+      `);
+      const pendientes = (res.recordset || []).filter((o) => !falloReciente(Number(o.id)));
+      await enParalelo(pendientes, 4, (o) => geocodificarYGuardar(pool, o));
+    } catch (err) {
+      console.error('[geocodificacion] pendientes:', err?.message);
+    } finally {
+      corriendo = false;
+    }
+  };
+  const timer = setInterval(tick, cadaMs);
+  timer.unref?.();
+  setTimeout(tick, 15000).unref?.();
+  console.log('[geocodificacion] HERE activo: geocodificando órdenes pendientes en segundo plano');
+  return timer;
 }
 
 /** Agrega latitud/longitud guardadas a las filas que no traigan coordenada propia. */
@@ -123,8 +257,9 @@ function aplicarCoordenadas(rows, coords, {
 }
 
 /**
- * Guarda (o actualiza) el punto de una orden. Un punto a nivel 'cp' nunca pisa
- * uno a nivel 'direccion' de la misma dirección.
+ * Guarda (o actualiza) el punto de una orden. Para la misma dirección, un punto
+ * de la app nunca pisa uno de HERE, y uno a nivel 'cp' nunca pisa uno a nivel
+ * 'direccion'.
  * @returns {Promise<boolean>} false si la orden no existe.
  */
 async function guardarCoordenada(pool, idOrden, { latitud, longitud, precision, idUsuario }) {
@@ -150,7 +285,11 @@ async function guardarCoordenada(pool, idOrden, { latitud, longitud, precision, 
       MERGE lm5k.OrdenesVentaGeocodificacion AS t
       USING (SELECT @IdOrden AS idOrden) AS s ON t.idOrden = s.idOrden
       WHEN MATCHED AND NOT (
-        t.huellaDireccion = @Huella AND t.nivelPrecision = N'direccion' AND @Precision = N'cp'
+        t.huellaDireccion = @Huella AND (
+          (t.nivelPrecision = N'direccion' AND @Precision = N'cp')
+          OR (t.nivelPrecision IN (${PRECISIONES_HERE.map((p) => `N'${p}'`).join(', ')})
+              AND @Precision NOT IN (${PRECISIONES_HERE.map((p) => `N'${p}'`).join(', ')}))
+        )
       ) THEN
         UPDATE SET latitud = @Latitud, longitud = @Longitud, nivelPrecision = @Precision,
                    huellaDireccion = @Huella, idUsuario = @IdUsuario,
@@ -168,5 +307,6 @@ module.exports = {
   aplicarCoordenadas,
   obtenerCoordenadasSeguras,
   guardarCoordenada,
+  iniciarGeocodificacionPendientes,
   isWithinMexico,
 };

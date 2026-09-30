@@ -16,6 +16,9 @@ const catalogsRoutes = require('./routes/catalogs');
 const validacionRoutes = require('./routes/validacion');
 const adminRoutes = require('./routes/admin');
 const ubicacionRoutes = require('./routes/ubicacion');
+const geoRoutes = require('./routes/geo');
+const { getPool } = require('./config/database');
+const { iniciarGeocodificacionPendientes } = require('./services/geocodificacion.service');
 const publicPaymentsRoutes = require('./routes/publicPayments');
 const mockPaymentsRoutes = require('./routes/mockPayments');
 const payCheckoutRoutes = require('./routes/payCheckout');
@@ -107,6 +110,7 @@ app.use('/api/backpacks', authenticate, backpacksRoutes);
 app.use('/api/catalogs', authenticate, catalogsRoutes);
 app.use('/api/validacion', authenticate, validacionRoutes);
 app.use('/api/admin', authenticate, adminRoutes);
+app.use('/api/geo', authenticate, geoRoutes);
 // Ubicación en tiempo real: se expone sin auth para permitir polling del dashboard web.
 app.use('/api/ubicacion', ubicacionRoutes);
 
@@ -116,6 +120,9 @@ app.use(errorHandler);
 const server = app.listen(PORT, () => {
   console.log(`🚀 Logimarket API corriendo en puerto ${PORT}`);
 });
+
+// Con HERE_API_KEY: geocodifica en segundo plano las órdenes activas sin punto.
+iniciarGeocodificacionPendientes(getPool);
 
 const shutdown = (signal) => {
   console.log(`${signal} recibido; cerrando Logimarket API de forma controlada`);
