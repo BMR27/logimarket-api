@@ -1,3 +1,5 @@
+const { reportarExcepcion } = require('./monitoreo');
+
 function errorHandler(err, req, res, next) {
   const msg = err?.message || String(err);
 
@@ -11,6 +13,7 @@ function errorHandler(err, req, res, next) {
   }
 
   console.error('Error:', msg, err?.stack);
+  reportarExcepcion(err, req, res);
   // detail incluido temporalmente para diagnóstico — remover después
   res.status(500).json({ error: 'Error interno del servidor', detail: msg });
 }

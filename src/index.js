@@ -25,6 +25,7 @@ const mockPaymentsRoutes = require('./routes/mockPayments');
 const payCheckoutRoutes = require('./routes/payCheckout');
 const stripeWebhookRoutes = require('./routes/stripeWebhook');
 const { errorHandler } = require('./middleware/errorHandler');
+const { monitoreoMiddleware, recibirReporteApp } = require('./middleware/monitoreo');
 const { authenticate } = require('./middleware/auth');
 
 const app = express();
@@ -39,6 +40,9 @@ const AUTH_RATE_LIMIT_MAX = parsePositiveInt(process.env.AUTH_RATE_LIMIT_MAX, 30
 
 // Railway y otros proxies envían X-Forwarded-For; express-rate-limit requiere trust proxy activo.
 app.set('trust proxy', 1);
+
+// Monitoreo: errores 5xx y respuestas lentas → alertas de NEXT OS LITE (solo mide, no altera la respuesta)
+app.use(monitoreoMiddleware);
 
 // Seguridad
 app.use(helmet());
@@ -95,6 +99,8 @@ app.get('/health', (req, res) => {
 
 // Rutas públicas
 app.use('/api/auth', authLimiter, authRoutes);
+// Errores y lentitud reportados por la app de mensajeros (sin sesión obligatoria; con tope por IP)
+app.post('/api/monitoreo/app', recibirReporteApp);
 app.use('/api/public/payments', publicPaymentsRoutes);
 app.use('/api/mock/payments', mockPaymentsRoutes);
 app.use('/pay', payCheckoutRoutes);
