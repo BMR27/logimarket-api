@@ -86,6 +86,9 @@ if (stripeWebhookRoutes) {
   app.use('/api/public/payments/stripe', stripeWebhookRoutes);
 }
 
+// La evidencia de entrega trae foto + firma en base64; algunos celulares toman fotos de más de
+// 1 MB. Se parsea aquí con su propio límite y el parser general la omite (body ya leído).
+app.use('/api/orders/:id/evidencia', express.json({ limit: '5mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // Health check (público)

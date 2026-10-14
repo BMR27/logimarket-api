@@ -104,6 +104,19 @@ function reportarExcepcion(err, req, res) {
   } catch { /* noop */ }
 }
 
+/** Error del cliente que conviene ver pero no es falla del servidor: se registra como
+ *  advertencia aunque se repita (NEXT OS LITE no la sube a crítica). */
+function reportarAviso(mensaje, req, res, status) {
+  try {
+    if (res) res.locals.monitoreoErrorReportado = true;
+    encolar({
+      origen: 'app-api', tipo: 'error', severidad: 'advertencia', mensaje,
+      metodo: req?.method, ruta: req ? rutaGenerica(req.originalUrl) : 'proceso', status,
+      usuario: req ? usuarioDe(req) : undefined, dispositivo: req?.headers?.['user-agent'],
+    });
+  } catch { /* noop */ }
+}
+
 // POST /api/monitoreo/app — errores y lentitud que reporta la app de mensajeros (Flutter).
 // Sin autenticación obligatoria (la app puede tener la sesión vencida); validado y con tope.
 const recibidosPorIp = new Map();
@@ -134,4 +147,4 @@ function recibirReporteApp(req, res) {
   res.json({ ok: true });
 }
 
-module.exports = { monitoreoMiddleware, reportarExcepcion, recibirReporteApp };
+module.exports = { monitoreoMiddleware, reportarExcepcion, reportarAviso, recibirReporteApp };
