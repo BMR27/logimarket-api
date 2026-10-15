@@ -11,7 +11,8 @@ const { sql } = require('../config/database');
 // pantalla "Comisión Mensajero"), la app muestra esa, aunque sea 0. No cambia lo que
 // calcula Corte Equipo. Solo en esos equipos: en otros (ej. Mérida) la tabla ya tiene
 // filas que no deben cambiar lo que ve el mensajero.
-const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10]); // 10 = Guadalajara - Perez
+// 10 = Guadalajara - Perez, 26 = Morelia - Salce, 64 = Aguascalientes - Contreras (estos dos en 0)
+const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10, 26, 64]);
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
