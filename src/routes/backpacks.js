@@ -384,7 +384,8 @@ router.post('/', async (req, res, next) => {
     }
 
     // Regla: no se pueden asignar a una mochila órdenes que ya son Exitosa (1),
-    // Depositada (10) o Pagada (11) — ya pasaron por el corte de equipo y/o cliente.
+    // Depositada (10) o Pagada (11), ni las que ya tienen fecha de corte — ya pasaron por el
+    // corte de equipo y/o cliente.
     const orderIdList = String(orderIds)
       .split(',')
       .map((s) => parseInt(s.trim(), 10))
@@ -398,18 +399,18 @@ router.post('/', async (req, res, next) => {
         return `@${paramName}`;
       });
       const statusCheck = await statusRequest.query(`
-        SELECT o.id, o.folioOrdenCliente, s.status
+        SELECT o.id, o.folioOrdenCliente, s.status, CONVERT(varchar(10), o.fechaCorte, 103) AS fechaCorte
         FROM lm5k.OrdenesVenta o
         LEFT JOIN lm5k.StatusOrdenes s ON s.id = o.idStatus
-        WHERE o.id IN (${placeholders.join(',')}) AND o.idStatus IN (1, 10, 11)
+        WHERE o.id IN (${placeholders.join(',')}) AND (o.idStatus IN (1, 10, 11) OR o.fechaCorte IS NOT NULL)
       `);
 
       if (statusCheck.recordset.length > 0) {
         const blocked = statusCheck.recordset
-          .map((r) => `${r.folioOrdenCliente || r.id} (${r.status})`)
+          .map((r) => `${r.folioOrdenCliente || r.id} (${r.status}${r.fechaCorte ? `, corte ${r.fechaCorte}` : ''})`)
           .join(', ');
         return res.status(409).json({
-          error: `No se pueden asignar órdenes en estatus Exitosa, Depositada o Pagada: ${blocked}`,
+          error: `No se pueden asignar órdenes Exitosas, Depositadas, Pagadas o con corte: ${blocked}`,
           code: 'ORDENES_NO_ASIGNABLES',
         });
       }
