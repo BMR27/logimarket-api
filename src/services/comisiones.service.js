@@ -13,10 +13,10 @@ const { sql } = require('../config/database');
 // filas que no deben cambiar lo que ve el mensajero.
 // 10 = Guadalajara - Perez, 26 = Morelia - Salce, 64 = Aguascalientes - Contreras,
 // 63 = San Juan del Rio - Flores, 28 = Nuevo Leon - Serrato, 90 = Tuxtla - Albores,
-// 1115 = Orizaba - Banda (todos menos Guadalajara en 0)
+// 1115 = Orizaba - Banda, 59 = SLP - Becerra (todos menos Guadalajara en 0)
 // Si la orden no tiene cobertura del CP (o no hay fila de ese tipo), se usa la fila
 // BASE del mensajero para que no caiga al tabulador.
-const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10, 26, 64, 63, 28, 90, 1115]);
+const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10, 26, 64, 63, 28, 90, 1115, 59]);
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
