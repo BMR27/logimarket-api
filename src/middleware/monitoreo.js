@@ -67,9 +67,16 @@ async function enviar() {
 
 setInterval(() => { enviar().catch(() => {}); }, 10_000).unref();
 
-/** Mide cada petición y reporta las que terminan en 5xx o tardan más de LENTA_MS. */
+/** Mide cada petición y reporta las que terminan en 5xx o tardan más de LENTA_MS.
+ *  La lentitud cuenta solo el tiempo del servidor: lo que tarda el celular en subir el cuerpo
+ *  (fotos de evidencia por datos móviles) no es lentitud de la API y daba falsas alarmas
+ *  (10/11/2026: hasta 78 s en /evidencia con el servidor en <1 s). La subida va en el detalle. */
 function monitoreoMiddleware(req, res, next) {
   const inicio = Date.now();
+  // Fin de la recepción del cuerpo. Escuchar 'end' no pone el stream en modo flujo: lo sigue
+  // leyendo express.json. Si nadie lo lee (GET), no dispara y se toma el inicio.
+  let finSubida = null;
+  req.once('end', () => { finSubida = Date.now(); });
   let cuerpo;
   const jsonOriginal = res.json.bind(res);
   res.json = (c) => { cuerpo = c; return jsonOriginal(c); };
@@ -77,13 +84,16 @@ function monitoreoMiddleware(req, res, next) {
     try {
       if (!activo() || req.path === '/health' || req.path.startsWith('/api/monitoreo')) return;
       const ms = Date.now() - inicio;
+      const subidaMs = finSubida ? Math.max(0, finSubida - inicio) : 0;
+      const servidorMs = ms - subidaMs;
       const status = res.statusCode;
-      if (status < 500 && ms < LENTA_MS) return;
+      if (status < 500 && servidorMs < LENTA_MS) return;
       if (res.locals.monitoreoErrorReportado) return;
       const mensaje = (cuerpo && (cuerpo.detail || cuerpo.error || cuerpo.message)) || `HTTP ${status}`;
       encolar({
         origen: 'app-api', tipo: status >= 500 ? 'error' : 'lento',
-        mensaje: status >= 500 ? String(mensaje) : `Respuesta lenta: ${(ms / 1000).toFixed(1)} s`,
+        mensaje: status >= 500 ? String(mensaje)
+          : `Respuesta lenta: ${(servidorMs / 1000).toFixed(1)} s en el servidor${subidaMs >= 1000 ? ` (+${(subidaMs / 1000).toFixed(1)} s de subida del dispositivo)` : ''}`,
         metodo: req.method, ruta: rutaGenerica(req.originalUrl), status, duracionMs: ms,
         usuario: usuarioDe(req), dispositivo: req.headers['user-agent'],
       });
