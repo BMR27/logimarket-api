@@ -18,6 +18,14 @@ const { sql } = require('../config/database');
 // BASE del mensajero para que no caiga al tabulador.
 const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10, 26, 64, 63, 28, 90, 1115, 59]);
 
+// Monto que ve el mensajero en la app según la comisión del equipo por orden, por equipo
+// (10/11/2026). Solo la app: Corte Equipo sigue con la comisión de la cobertura. Montos que
+// no estén en la tabla se muestran igual.
+// 1156 = Culiacan - Silvas: 110 → 95 y 150 → 120
+const AJUSTE_COMISION_APP = new Map([
+  [1156, new Map([[110, 95], [150, 120]])],
+]);
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -116,6 +124,8 @@ async function calcularComisionesOrdenes(pool, ordenes) {
     else if (cob === 'foranea' && row.comisionRemota != null) comision = Number(row.comisionRemota);
     else comision = comisionFija;
     comision = round2(comision);
+    const ajuste = AJUSTE_COMISION_APP.get(Number(row.idEquipo));
+    if (ajuste && ajuste.has(comision)) comision = ajuste.get(comision);
     const total = Number(row.total) || 0;
     resultado.set(row.id, {
       cobertura: row.cobertura,
