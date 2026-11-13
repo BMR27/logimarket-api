@@ -22,6 +22,8 @@ const EQUIPOS_CON_COMISION_MENSAJERO = new Set([10, 26, 64, 63, 28, 90, 1115, 59
 // (10/11/2026). Solo la app: Corte Equipo sigue con la comisión de la cobertura. Montos que
 // no estén en la tabla se muestran igual.
 // 1156 = Culiacan - Silvas: 110 → 95 y 150 → 120
+// Se muestra en Corte Equipo → Comisión Mensajero desde una copia en LM5K_BACKEND
+// (AJUSTES_COMISION_APP en src/routes/equipos.routes.ts): si cambia aquí, cambiar allá.
 const AJUSTE_COMISION_APP = new Map([
   [1156, new Map([[110, 95], [150, 120]])],
 ]);
