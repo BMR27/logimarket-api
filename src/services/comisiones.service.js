@@ -28,6 +28,19 @@ const AJUSTE_COMISION_APP = new Map([
   [1156, new Map([[110, 95], [150, 120]])],
 ]);
 
+// Igual que AJUSTE_COMISION_APP pero solo para ciertos CPs del equipo (23/11/2026): la orden de
+// ese equipo con uno de estos CPs se ve con el monto ajustado, la tenga el mensajero que sea.
+// Va antes que el ajuste por equipo. Solo la app: Corte Equipo no cambia.
+// 1123 = Logim - Corporativo, CPs de Tecámac (Extendida 120): 120 → 95
+// Copia informativa en LM5K_BACKEND (AJUSTES_COMISION_APP en src/routes/equipos.routes.ts).
+const AJUSTE_COMISION_APP_CP = new Map([
+  [1123, {
+    cps: new Set(['55740', '55743', '55744', '55745', '55746', '55747', '55748', '55749', '55750', '55752', '55754', '55755', '55757',
+      '55758', '55760', '55763', '55764', '55765', '55766', '55767', '55768', '55770', '55773', '55776', '55778']),
+    montos: new Map([[120, 95]]),
+  }],
+]);
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -74,6 +87,7 @@ async function calcularComisionesOrdenes(pool, ordenes) {
     SELECT
       o.id,
       o.idEquipo,
+      o.codigoPostal,
       o.total,
       ISNULL(cob.cobertura, 'sin cobertura') AS cobertura,
       cob.comisionEquipo,
@@ -126,7 +140,8 @@ async function calcularComisionesOrdenes(pool, ordenes) {
     else if (cob === 'foranea' && row.comisionRemota != null) comision = Number(row.comisionRemota);
     else comision = comisionFija;
     comision = round2(comision);
-    const ajuste = AJUSTE_COMISION_APP.get(Number(row.idEquipo));
+    const ajusteCp = AJUSTE_COMISION_APP_CP.get(Number(row.idEquipo));
+    const ajuste = ajusteCp && ajusteCp.cps.has(String(row.codigoPostal ?? '').trim()) ? ajusteCp.montos : AJUSTE_COMISION_APP.get(Number(row.idEquipo));
     if (ajuste && ajuste.has(comision)) comision = ajuste.get(comision);
     const total = Number(row.total) || 0;
     resultado.set(row.id, {
